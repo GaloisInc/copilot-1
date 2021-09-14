@@ -14,6 +14,10 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
 
+-- Notes from Ben
+--    Distrust floats...
+--    signed/unsigned bitvector stuff, see below
+
 -- |
 -- Module      : Copilot.Theorem.What4
 -- Description : Prove spec properties using What4.
@@ -58,9 +62,9 @@
 -- to simply interpreting the spec, although external variables are still
 -- represented as constants with unknown values.
 
-module Copilot.Theorem.What4
-  ( prove, Solver(..), SatResult(..)
-  ) where
+module Copilot.Theorem.What4 where
+--  ( prove, Solver(..), SatResult(..)
+--  ) where
 
 import qualified Copilot.Core.Expr       as CE
 import qualified Copilot.Core.Operators  as CE
@@ -143,13 +147,6 @@ prove solver spec = do
     Yices -> WC.extendConfig WS.yicesOptions (WI.getConfiguration sym)
     Z3 -> WC.extendConfig WS.z3Options (WI.getConfiguration sym)
 
-  -- Build up initial translation state
-  let streamMap = Map.fromList $
-        (\stream -> (CS.streamId stream, stream)) <$> CS.specStreams spec
-  pow <- WI.freshTotalUninterpFn sym (WI.safeSymbol "pow") knownRepr knownRepr
-  logb <- WI.freshTotalUninterpFn sym (WI.safeSymbol "logb") knownRepr knownRepr
-  let st = TransState Map.empty Map.empty Map.empty streamMap pow logb
-
   -- Define TransM action for proving properties. Doing this in TransM rather
   -- than IO allows us to reuse the state for each property.
   let proveProperties = forM (CS.specProperties spec) $ \pr -> do
@@ -158,8 +155,19 @@ prove solver spec = do
         prefix <- forM [0 .. maxBufLen - 1] $ \k -> do
           XBool p <- translateExprAt sym k (CS.propertyExpr pr)
           return p
+
+        -- translate the induction hypothesis for all values up to maxBufLen in the past
+        ind_hyps <- forM [1 .. maxBufLen] $ \k -> do
+          XBool hyp <- translateExpr sym (negate k) (CS.propertyExpr pr)
+          return hyp
+
+        -- translate the predicate for the "current" value
         XBool p <- translateExpr sym 0 (CS.propertyExpr pr)
-        p_and_prefix <- liftIO $ foldrM (WI.andPred sym) p prefix
+
+        -- compute the predicate (ind_hyps ==> p)
+        p' <- liftIO $ foldrM (WI.impliesPred sym) p ind_hyps
+
+        p_and_prefix <- liftIO $ foldrM (WI.andPred sym) p' prefix
         not_p_and_prefix <- liftIO $ WI.notPred sym p_and_prefix
 
         let clauses = [not_p_and_prefix]
@@ -182,8 +190,45 @@ prove solver spec = do
             WS.Unknown -> return (CS.propertyName pr, Unknown)
 
   -- Execute the action and return the results for each property
-  (res, _) <- runStateT (unTransM proveProperties) st
-  return res
+  runTransM sym spec proveProperties
+
+
+data BisimulationProofState t =
+  BisimulationProofState
+  { streamState :: [(CE.Id, Some CT.Type, [XExpr t])]
+  }
+
+data BisimulationProofBundle t =
+  BisimulationProofBundle
+  { initialStreamState :: BisimulationProofState t
+--  , preStreamState     :: BisimulationProofState t
+--  , postStreamState    :: BisimulationProofState t
+--  , externalInputs     :: Map Id (XExpr t)
+--  , triggerState       :: Map Id (WB.BoolExpr t, [XExpr t])
+  }
+
+
+computeBisimulationProofBundle ::
+  WB.ExprBuilder t st fs ->
+  CS.Spec ->
+  IO (BisimulationProofBundle t)
+computeBisimulationProofBundle sym spec =
+  do iss <- computeInitialStreamState sym spec
+     return
+       BisimulationProofBundle
+       { initialStreamState = iss
+       }
+
+computeInitialStreamState ::
+  WB.ExprBuilder t st fs ->
+  CS.Spec ->
+  IO (BisimulationProofState t)
+computeInitialStreamState sym spec =
+  do xs <- forM (CS.specStreams spec) $
+            \CS.Stream{ CS.streamId = nm, CS.streamExprType = tp, CS.streamBuffer = buf }  ->
+            do vs <- mapM (translateConstExpr sym tp) buf
+               return (nm, Some tp, vs)
+     return (BisimulationProofState xs)
 
 --------------------------------------------------------------------------------
 -- What4 translation
@@ -254,6 +299,18 @@ panic :: MonadIO m => m a
 panic = Panic.panic CopilotWhat4 "Copilot.Theorem.What4"
         [ "Ill-typed core expression" ]
 
+runTransM :: WB.ExprBuilder t st fs -> CS.Spec -> TransM t a -> IO a
+runTransM sym spec m =
+  do -- Build up initial translation state
+     let streamMap = Map.fromList $
+           (\stream -> (CS.streamId stream, stream)) <$> CS.specStreams spec
+     pow <- WI.freshTotalUninterpFn sym (WI.safeSymbol "pow") knownRepr knownRepr
+     logb <- WI.freshTotalUninterpFn sym (WI.safeSymbol "logb") knownRepr knownRepr
+     let st = TransState Map.empty Map.empty Map.empty streamMap pow logb
+
+     (res, _) <- runStateT (unTransM m) st
+     return res
+
 -- | The What4 representation of a copilot expression. We do not attempt to
 -- track the type of the inner expression at the type level, but instead lump
 -- everything together into the 'XExpr t' type. The only reason this is a GADT
@@ -291,7 +348,7 @@ valFromExpr :: WG.GroundEvalFn t -> XExpr t -> IO (Some CopilotValue)
 valFromExpr ge xe = case xe of
   XBool e -> Some . CopilotValue CT.Bool <$> WG.groundEval ge e
   XInt8 e -> Some . CopilotValue CT.Int8 . fromBV <$> WG.groundEval ge e
-  XInt16 e -> Some . CopilotValue CT.Int16 . fromBV <$> WG.groundEval ge e
+  XInt16 e -> Some . CopilotValue CT.Int16 . fromBV <$> WG.groundEval ge e -- TODO! need signed version of fromBV
   XInt32 e -> Some . CopilotValue CT.Int32 . fromBV <$> WG.groundEval ge e
   XInt64 e -> Some . CopilotValue CT.Int64 . fromBV <$> WG.groundEval ge e
   XWord8 e -> Some . CopilotValue CT.Word8 . fromBV <$> WG.groundEval ge e

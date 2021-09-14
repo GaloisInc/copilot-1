@@ -201,9 +201,9 @@ data BisimulationProofState t =
 data BisimulationProofBundle t =
   BisimulationProofBundle
   { initialStreamState :: BisimulationProofState t
---  , preStreamState     :: BisimulationProofState t
---  , postStreamState    :: BisimulationProofState t
---  , externalInputs     :: Map Id (XExpr t)
+  , preStreamState     :: BisimulationProofState t
+  , postStreamState    :: BisimulationProofState t
+  , externalInputs     :: [(CE.Name, Some CT.Type, XExpr t)]
 --  , triggerState       :: Map Id (WB.BoolExpr t, [XExpr t])
   }
 
@@ -214,10 +214,17 @@ computeBisimulationProofBundle ::
   IO (BisimulationProofBundle t)
 computeBisimulationProofBundle sym spec =
   do iss <- computeInitialStreamState sym spec
-     return
-       BisimulationProofBundle
-       { initialStreamState = iss
-       }
+     runTransM sym spec $
+       do prestate  <- computePrestate sym spec
+          poststate <- computePoststate sym spec
+          externs   <- computeExternalInputs sym
+          return
+            BisimulationProofBundle
+            { initialStreamState = iss
+            , preStreamState  = prestate
+            , postStreamState = poststate
+            , externalInputs  = externs
+            }
 
 computeInitialStreamState ::
   WB.ExprBuilder t st fs ->
@@ -229,6 +236,42 @@ computeInitialStreamState sym spec =
             do vs <- mapM (translateConstExpr sym tp) buf
                return (nm, Some tp, vs)
      return (BisimulationProofState xs)
+
+computePrestate ::
+  WB.ExprBuilder t st fs ->
+  CS.Spec ->
+  TransM t (BisimulationProofState t)
+computePrestate sym spec =
+  do xs <- forM (CS.specStreams spec) $
+             \CS.Stream{ CS.streamId = nm, CS.streamExprType = tp, CS.streamBuffer = buf } ->
+             do let buflen = length buf
+                let idxes = reverse $ map negate $ [ 1 .. buflen ]
+                vs <- mapM (getStreamConstant sym nm) idxes
+                return (nm, Some tp, vs)
+     return (BisimulationProofState xs)
+
+computePoststate ::
+  WB.ExprBuilder t st fs ->
+  CS.Spec ->
+  TransM t (BisimulationProofState t)
+computePoststate sym spec =
+  do xs <- forM (CS.specStreams spec) $
+             \CS.Stream{ CS.streamId = nm, CS.streamExprType = tp, CS.streamBuffer = buf, CS.streamExpr = ex } ->
+             do let buflen = length buf
+                let idxes = reverse $ map negate $ [ 1 .. buflen-1 ]
+                vs <- mapM (getStreamConstant sym nm) idxes
+                v0 <- translateExpr sym 0 ex
+                return (nm, Some tp, vs ++ [v0])
+     return (BisimulationProofState xs)
+
+computeExternalInputs ::
+  WB.ExprBuilder t st fs ->
+  TransM t [(CE.Name, Some CT.Type, XExpr t)]
+computeExternalInputs sym =
+  do exts <- Map.toList <$> gets mentionedExternals
+     forM exts $ \(nm, Some tp) ->
+       do v <- getExternConstant sym tp nm 0
+          return (nm, Some tp, v)
 
 --------------------------------------------------------------------------------
 -- What4 translation
@@ -247,6 +290,8 @@ computeInitialStreamState sym spec =
 -- core stream definitions, a symbolic uninterpreted function for "pow", and a
 -- symbolic uninterpreted function for "logb".
 data TransState t = TransState {
+  -- | Map keeping track of all external variables encountered during translation.
+  mentionedExternals :: Map.Map CE.Name (Some CT.Type),
   -- | Map of all external variables we encounter during translation. These are
   -- just fresh constants. The offset indicates how many timesteps in the past
   -- this constant represents for that stream.
@@ -306,7 +351,7 @@ runTransM sym spec m =
            (\stream -> (CS.streamId stream, stream)) <$> CS.specStreams spec
      pow <- WI.freshTotalUninterpFn sym (WI.safeSymbol "pow") knownRepr knownRepr
      logb <- WI.freshTotalUninterpFn sym (WI.safeSymbol "logb") knownRepr knownRepr
-     let st = TransState Map.empty Map.empty Map.empty streamMap pow logb
+     let st = TransState Map.empty Map.empty Map.empty Map.empty streamMap pow logb
 
      (res, _) <- runStateT (unTransM m) st
      return res
@@ -496,7 +541,9 @@ getExternConstant sym tp var offset = do
     Just xe -> return xe
     Nothing -> do
       xe <- liftIO $ freshCPConstant sym var tp
-      modify (\st -> st { externVars = Map.insert (var, offset) xe es} )
+      modify (\st -> st { externVars = Map.insert (var, offset) xe es
+                        , mentionedExternals = Map.insert var (Some tp) (mentionedExternals st)
+                        } )
       return xe
 
 -- | Get the constant for a given external variable at some specific timestep.
@@ -511,7 +558,9 @@ getExternConstantAt sym tp var ix = do
     Just xe -> return xe
     Nothing -> do
       xe <- liftIO $ freshCPConstant sym var tp
-      modify (\st -> st { externVarsAt = Map.insert (var, ix) xe es} )
+      modify (\st -> st { externVarsAt = Map.insert (var, ix) xe es
+                        , mentionedExternals = Map.insert var (Some tp) (mentionedExternals st)
+                        } )
       return xe
 
 -- | Retrieve a stream definition given its id.

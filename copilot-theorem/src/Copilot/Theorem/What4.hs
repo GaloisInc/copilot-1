@@ -204,7 +204,7 @@ data BisimulationProofBundle t =
   , preStreamState     :: BisimulationProofState t
   , postStreamState    :: BisimulationProofState t
   , externalInputs     :: [(CE.Name, Some CT.Type, XExpr t)]
---  , triggerState       :: Map Id (WB.BoolExpr t, [XExpr t])
+  , triggerState       :: [(CE.Name, WB.BoolExpr t, [(Some CT.Type, XExpr t)])]
   }
 
 
@@ -217,6 +217,7 @@ computeBisimulationProofBundle sym spec =
      runTransM sym spec $
        do prestate  <- computePrestate sym spec
           poststate <- computePoststate sym spec
+          triggers  <- computeTriggerState sym spec
           externs   <- computeExternalInputs sym
           return
             BisimulationProofBundle
@@ -224,6 +225,7 @@ computeBisimulationProofBundle sym spec =
             , preStreamState  = prestate
             , postStreamState = poststate
             , externalInputs  = externs
+            , triggerState   = triggers
             }
 
 computeInitialStreamState ::
@@ -263,6 +265,20 @@ computePoststate sym spec =
                 v0 <- translateExpr sym 0 ex
                 return (nm, Some tp, vs ++ [v0])
      return (BisimulationProofState xs)
+
+computeTriggerState ::
+  WB.ExprBuilder t st fs ->
+  CS.Spec ->
+  TransM t [(CE.Name, WB.BoolExpr t, [(Some CT.Type, XExpr t)])]
+computeTriggerState sym spec = forM (CS.specTriggers spec) $
+    \CS.Trigger{ CS.triggerName = nm, CS.triggerGuard = guard, CS.triggerArgs = args } ->
+      do XBool guard' <- translateExpr sym (-1) guard
+         args' <- mapM computeArg args
+         return (nm, guard', args')
+  where
+   computeArg CE.UExpr{ CE.uExprType = tp, CE.uExprExpr = ex } =
+     do v <- translateExpr sym (-1) ex
+        return (Some tp, v)
 
 computeExternalInputs ::
   WB.ExprBuilder t st fs ->

@@ -272,12 +272,12 @@ computeTriggerState ::
   TransM t [(CE.Name, WB.BoolExpr t, [(Some CT.Type, XExpr t)])]
 computeTriggerState sym spec = forM (CS.specTriggers spec) $
     \CS.Trigger{ CS.triggerName = nm, CS.triggerGuard = guard, CS.triggerArgs = args } ->
-      do XBool guard' <- translateExpr sym (-1) guard
+      do XBool guard' <- translateExpr sym 0 guard
          args' <- mapM computeArg args
          return (nm, guard', args')
   where
    computeArg CE.UExpr{ CE.uExprType = tp, CE.uExprExpr = ex } =
-     do v <- translateExpr sym (-1) ex
+     do v <- translateExpr sym 0 ex
         return (Some tp, v)
 
 computeExternalInputs ::
@@ -596,18 +596,20 @@ translateExpr :: WB.ExprBuilder t st fs
               -> TransM t (XExpr t)
 translateExpr sym offset e = case e of
   CE.Const tp a -> liftIO $ translateConstExpr sym tp a
-  CE.Drop _tp ix streamId
-    -- If we are referencing a past value of this stream, just return an
-    -- unconstrained constant.
-    | offset + fromIntegral ix < 0 ->
-        getStreamConstant sym streamId (offset + fromIntegral ix)
-    -- If we are referencing a current or future value of this stream, we need
-    -- to translate the stream's expression, using an offset computed based on
-    -- the current offset (negative or 0), the drop index (positive or 0), and
-    -- the length of the stream's buffer (subtracted).
-    | otherwise -> do
-      CS.Stream _ buf e _ <- getStreamDef streamId
-      translateExpr sym (offset + fromIntegral ix - length buf) e
+  CE.Drop _tp ix streamId ->
+    do CS.Stream _ buf e _ <- getStreamDef streamId
+       let newidx = offset + fromIntegral ix - length buf
+       if newidx < 0 then
+         -- If we are referencing a past value of this stream, just return an
+         -- unconstrained constant.
+         getStreamConstant sym streamId newidx
+       else
+         -- If we are referencing a current or future value of this stream, we need
+         -- to translate the stream's expression, using an offset computed based on
+         -- the current offset (negative or 0), the drop index (positive or 0), and
+         -- the length of the stream's buffer (subtracted).
+         translateExpr sym newidx e
+
   CE.Local _ _ _ _ _ -> error "translateExpr: Local unimplemented"
   CE.Var _ _ -> error "translateExpr: Var unimplemented"
   CE.ExternVar tp nm _prefix -> getExternConstant sym tp nm offset

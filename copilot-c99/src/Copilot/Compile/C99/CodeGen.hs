@@ -34,7 +34,7 @@ mkextdecln :: External -> C.Decln
 mkextdecln (External name _ ty) = decln
   where
     decln = C.VarDecln (Just C.Extern) cty name Nothing
-    cty   = transtype ty
+    cty   = C.Volatile (transtype ty)
 
 -- | Make a declaration for a copy of an external variable.
 mkextcpydecln :: External -> C.Decln

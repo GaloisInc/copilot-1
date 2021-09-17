@@ -153,16 +153,16 @@ prove solver spec = do
         let bufLen (CS.Stream _ buf _ _) = genericLength buf
             maxBufLen = maximum (0 : (bufLen <$> CS.specStreams spec))
         prefix <- forM [0 .. maxBufLen - 1] $ \k -> do
-          XBool p <- translateExpr sym (CS.propertyExpr pr) (AbsoluteOffset k)
+          XBool p <- translateExpr sym mempty (CS.propertyExpr pr) (AbsoluteOffset k)
           return p
 
         -- translate the induction hypothesis for all values up to maxBufLen in the past
         ind_hyps <- forM [0 .. maxBufLen-1] $ \k -> do
-          XBool hyp <- translateExpr sym (CS.propertyExpr pr) (RelativeOffset k)
+          XBool hyp <- translateExpr sym mempty (CS.propertyExpr pr) (RelativeOffset k)
           return hyp
 
         -- translate the predicate for the "current" value
-        XBool p <- translateExpr sym (CS.propertyExpr pr) (RelativeOffset maxBufLen)
+        XBool p <- translateExpr sym mempty (CS.propertyExpr pr) (RelativeOffset maxBufLen)
 
         -- compute the predicate (ind_hyps ==> p)
         p' <- liftIO $ foldrM (WI.impliesPred sym) p ind_hyps
@@ -271,12 +271,12 @@ computeTriggerState ::
   TransM t [(CE.Name, WB.BoolExpr t, [(Some CT.Type, XExpr t)])]
 computeTriggerState sym spec = forM (CS.specTriggers spec) $
     \CS.Trigger{ CS.triggerName = nm, CS.triggerGuard = guard, CS.triggerArgs = args } ->
-      do XBool guard' <- translateExpr sym guard (RelativeOffset 0)
+      do XBool guard' <- translateExpr sym mempty guard (RelativeOffset 0)
          args' <- mapM computeArg args
          return (nm, guard', args')
   where
    computeArg CE.UExpr{ CE.uExprType = tp, CE.uExprExpr = ex } =
-     do v <- translateExpr sym ex (RelativeOffset 0)
+     do v <- translateExpr sym mempty ex (RelativeOffset 0)
         return (Some tp, v)
 
 computeExternalInputs ::
@@ -552,36 +552,47 @@ computeStreamValue
     AbsoluteOffset i
       | i < 0     -> fail ("Invalid absolute offset " ++ show i ++ " for stream " ++ show id)
       | i < len   -> liftIO (translateConstExpr sym tp (genericIndex buf i))
-      | otherwise -> translateExpr sym ex (AbsoluteOffset (i - len))
+      | otherwise -> translateExpr sym mempty ex (AbsoluteOffset (i - len))
     RelativeOffset i
       | i < 0     -> fail ("Invalid relative offset " ++ show i ++ " for stream " ++ show id)
       | i < len   -> let nm = "s" ++ show id ++ "_r" ++ show i
                      in liftIO (freshCPConstant sym nm tp)
-      | otherwise -> translateExpr sym ex (RelativeOffset (i - len))
+      | otherwise -> translateExpr sym mempty ex (RelativeOffset (i - len))
 
   where
     len = genericLength buf
 
-translateExpr :: WB.ExprBuilder t st fs -> CE.Expr a -> StreamOffset -> TransM t (XExpr t)
-translateExpr sym e offset = case e of
+type LocalEnv t = Map.Map CE.Name (StreamOffset -> TransM t (XExpr t))
+
+translateExpr :: WB.ExprBuilder t st fs -> LocalEnv t -> CE.Expr a -> StreamOffset -> TransM t (XExpr t)
+translateExpr sym localEnv e offset = case e of
   CE.Const tp a -> liftIO $ translateConstExpr sym tp a
   CE.Drop _tp ix streamId -> getStreamValue sym streamId (addOffset offset ix)
   CE.ExternVar tp nm _prefix -> getExternConstant sym tp nm offset
-  CE.Op1 op e -> liftIO . translateOp1 sym op =<< translateExpr sym e offset
-  CE.Op2 op e1 e2 -> do
-    xe1 <- translateExpr sym e1 offset
-    xe2 <- translateExpr sym e2 offset
-    powFn <- gets pow
-    logbFn <- gets logb
-    liftIO $ translateOp2 sym powFn logbFn op xe1 xe2
-  CE.Op3 op e1 e2 e3 -> do
-    xe1 <- translateExpr sym e1 offset
-    xe2 <- translateExpr sym e2 offset
-    xe3 <- translateExpr sym e3 offset
-    liftIO $ translateOp3 sym op xe1 xe2 xe3
-  CE.Label _ _ _ -> error "translateExpr: Label unimplemented"
-  CE.Local _ _ _ _ _ -> error "translateExpr: Local unimplemented"
-  CE.Var _ _ -> error "translateExpr: Var unimplemented"
+  CE.Op1 op e1 ->
+    do xe1 <- translateExpr sym localEnv e1 offset
+       liftIO $ translateOp1 sym op xe1
+  CE.Op2 op e1 e2 ->
+    do xe1 <- translateExpr sym localEnv e1 offset
+       xe2 <- translateExpr sym localEnv e2 offset
+       powFn <- gets pow
+       logbFn <- gets logb
+       liftIO $ translateOp2 sym powFn logbFn op xe1 xe2
+  CE.Op3 op e1 e2 e3 ->
+    do xe1 <- translateExpr sym localEnv e1 offset
+       xe2 <- translateExpr sym localEnv e2 offset
+       xe3 <- translateExpr sym localEnv e3 offset
+       liftIO $ translateOp3 sym op xe1 xe2 xe3
+  CE.Label _ _ e1 ->
+    translateExpr sym localEnv e1 offset
+  CE.Local _tpa _tpb nm e1 body ->
+    do let f = translateExpr sym localEnv e1
+       let localEnv' = Map.insert nm f localEnv
+       translateExpr sym localEnv' body offset
+  CE.Var _tp nm ->
+    case Map.lookup nm localEnv of
+      Nothing -> fail ("translateExpr: unknown var " ++ show nm)
+      Just f  -> f offset
 
 getExternConstant ::
   WB.ExprBuilder t st fs -> CT.Type a -> CE.Name -> StreamOffset -> TransM t (XExpr t)

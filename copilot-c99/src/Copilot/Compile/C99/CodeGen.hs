@@ -8,6 +8,7 @@ module Copilot.Compile.C99.CodeGen
 
 import Control.Monad.State  (runState)
 import Data.List            (union, unzip4)
+import Data.Maybe           (catMaybes)
 import Data.Typeable        (Typeable)
 
 import qualified Language.C99.Simple as C
@@ -43,6 +44,11 @@ mkextcpydecln (External name cpyname ty) = decln where
 
 -- | Make a C buffer variable and initialise it with the stream buffer.
 mkbuffdecln :: Id -> Type a -> [a] -> C.Decln
+-- special case for length-1 buffers.  We don't need an array, just a scalar
+mkbuffdecln sid ty [x] = C.VarDecln (Just C.Static) cty name initval where
+  name     = streamname sid
+  cty      = transtype ty
+  initval  = Just $ C.InitExpr $ constty ty x
 mkbuffdecln sid ty xs = C.VarDecln (Just C.Static) cty name initvals where
   name     = streamname sid
   cty      = C.Array (transtype ty) (Just $ C.LitInt $ fromIntegral buffsize)
@@ -58,6 +64,15 @@ mkindexdecln sid = C.VarDecln (Just C.Static) cty name initval where
 
 -- | Define an accessor functions for the ring buffer associated with a stream
 mkaccessdecln :: Id -> Type a -> [a] -> C.FunDef
+
+-- special case for length-1 buffers, ignore the index and just return the single value
+mkaccessdecln sid ty [x] = C.FunDef cty name params [] [C.Return (Just expr)]
+  where
+    cty        = C.decay $ transtype ty
+    name       = streamaccessorname sid
+    params     = [C.Param (C.TypeSpec $ C.TypedefName "size_t") "x"]
+    expr       = C.Ident (streamname sid)
+
 mkaccessdecln sid ty xs = C.FunDef cty name params [] [C.Return (Just expr)]
   where
     cty        = C.decay $ transtype ty
@@ -77,12 +92,12 @@ mkstep cSettings streams triggers exts =
          ++ map mktriggercheck triggers
          ++ tmpassigns
          ++ bufferupdates
-         ++ indexupdates
+         ++ catMaybes indexupdates
   (declns, tmpassigns, bufferupdates, indexupdates) =
     unzip4 $ map mkupdateglobals streams
 
   -- Write code to update global stream buffers and index.
-  mkupdateglobals :: Stream -> (C.Decln, C.Stmt, C.Stmt, C.Stmt)
+  mkupdateglobals :: Stream -> (C.Decln, C.Stmt, C.Stmt, Maybe C.Stmt)
   mkupdateglobals (Stream sid buff expr ty) =
     (tmpdecln, tmpassign, bufferupdate, indexupdate)
       where
@@ -94,14 +109,17 @@ mkstep cSettings streams triggers exts =
               size = C.LitInt $ fromIntegral $ tysize ty
           _       -> C.Expr $ C.Ident tmp_var C..= val
 
-        bufferupdate = case ty of
-          Array _ -> C.Expr $ memcpy dest (C.Ident tmp_var) size
-            where
-              dest = C.Index buff_var index_var
-              size = C.LitInt $ fromIntegral $ tysize ty
-          _       -> C.Expr $ C.Index buff_var index_var C..= (C.Ident tmp_var)
+        bufferupdate =
+          case ty of
+            Array _ -> C.Expr $ memcpy dest (C.Ident tmp_var) (C.LitInt $ fromIntegral $ tysize ty)
+            _       -> C.Expr $ dest C..= (C.Ident tmp_var)
 
-        indexupdate = C.Expr $ index_var C..= (incindex C..% bufflength)
+          where
+            dest = if length buff > 1 then C.Index buff_var index_var else buff_var
+
+        indexupdate
+           | length buff > 1 = Just $ C.Expr $ index_var C..= (incindex C..% bufflength)
+           | otherwise       = Nothing
           where
             bufflength = C.LitInt $ fromIntegral $ length buff
             incindex   = index_var C..+ C.LitInt 1
@@ -176,4 +194,3 @@ gatherexprs streams triggers =  map streamexpr streams
                              ++ concatMap triggerexpr triggers where
   streamexpr  (Stream _ _ expr ty)   = UExpr ty expr
   triggerexpr (Trigger _ guard args) = UExpr Bool guard : args
-

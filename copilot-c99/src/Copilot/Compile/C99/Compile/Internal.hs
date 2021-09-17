@@ -83,9 +83,11 @@ compilec cSettings spec = C.TransUnit declns funs where
 
   -- Make buffer and index declarations for streams.
   mkglobals :: [Stream] -> [C.Decln]
-  mkglobals streams = map buffdecln streams ++ map indexdecln streams where
-    buffdecln  (Stream sid buff _ ty) = mkbuffdecln  sid ty buff
-    indexdecln (Stream sid _    _ _ ) = mkindexdecln sid
+  mkglobals streams = concatMap buffdeclns streams
+    where
+    buffdeclns (Stream sid buff _ ty)
+      | length buff == 1 = [mkbuffdecln sid ty buff]
+      | otherwise        = [mkbuffdecln sid ty buff, mkindexdecln sid]
 
   -- Make generator functions, including trigger arguments.
   genfuns :: [Stream] -> [Trigger] -> [C.FunDef]

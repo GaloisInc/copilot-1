@@ -760,6 +760,10 @@ translateOp1 sym op xe = case (op, xe) of
     (XWord32 e, CT.Word32) -> return $ XWord32 e
     (XWord32 e, CT.Word64) -> XWord64 <$> WI.bvZext sym knownNat e
     (XWord64 e, CT.Word64) -> return $ XWord64 e
+
+    -- TODO! add the other "unsafe" casts
+    (XWord64 e, CT.Word32) -> XWord32 <$> WI.bvTrunc sym knownNat e
+
     _ -> panic
   (CE.GetField (CT.Struct s) _ftp extractor, XStruct xes) -> do
     let fieldNameRepr = fieldName (extractor undefined)

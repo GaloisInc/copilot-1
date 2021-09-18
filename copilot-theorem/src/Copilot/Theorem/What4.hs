@@ -83,6 +83,7 @@ import qualified What4.Solver.DReal     as WS
 import qualified Control.Monad.Fail as Fail
 import Control.Monad.State
 import qualified Data.BitVector.Sized as BV
+import Data.IORef (newIORef, readIORef, modifyIORef)
 import Data.Foldable (foldrM)
 import Data.List (elemIndex, genericLength, genericIndex)
 import Data.Maybe (fromJust)
@@ -586,7 +587,14 @@ translateExpr sym localEnv e offset = case e of
   CE.Label _ _ e1 ->
     translateExpr sym localEnv e1 offset
   CE.Local _tpa _tpb nm e1 body ->
-    do let f = translateExpr sym localEnv e1
+    do ref <- liftIO (newIORef mempty)
+       let f o = do m <- liftIO (readIORef ref)
+                    case Map.lookup o m of
+                      Just x -> return x
+                      Nothing ->
+                        do x <- translateExpr sym localEnv e1 o
+                           liftIO (modifyIORef ref (Map.insert o x))
+                           return x
        let localEnv' = Map.insert nm f localEnv
        translateExpr sym localEnv' body offset
   CE.Var _tp nm ->

@@ -206,19 +206,22 @@ data BisimulationProofBundle t =
   , postStreamState    :: BisimulationProofState t
   , externalInputs     :: [(CE.Name, Some CT.Type, XExpr t)]
   , triggerState       :: [(CE.Name, WB.BoolExpr t, [(Some CT.Type, XExpr t)])]
+  , assumptions        :: [WB.BoolExpr t]
   }
 
 
 computeBisimulationProofBundle ::
   WB.ExprBuilder t st fs ->
+  [String] ->
   CS.Spec ->
   IO (BisimulationProofBundle t)
-computeBisimulationProofBundle sym spec =
+computeBisimulationProofBundle sym properties spec =
   do iss <- computeInitialStreamState sym spec
      runTransM sym spec $
        do prestate  <- computePrestate sym spec
           poststate <- computePoststate sym spec
           triggers  <- computeTriggerState sym spec
+          assms     <- computeAssumptions sym properties spec
           externs   <- computeExternalInputs sym
           return
             BisimulationProofBundle
@@ -226,8 +229,10 @@ computeBisimulationProofBundle sym spec =
             , preStreamState  = prestate
             , postStreamState = poststate
             , externalInputs  = externs
-            , triggerState   = triggers
+            , triggerState    = triggers
+            , assumptions     = assms
             }
+
 
 computeInitialStreamState ::
   WB.ExprBuilder t st fs ->
@@ -288,6 +293,21 @@ computeExternalInputs sym =
      forM exts $ \(nm, Some tp) ->
        do v <- getExternConstant sym tp nm (RelativeOffset 0)
           return (nm, Some tp, v)
+
+computeAssumptions ::
+  WB.ExprBuilder t st fs ->
+  [String] ->
+  CS.Spec ->
+  TransM t [WB.BoolExpr t]
+computeAssumptions sym properties spec =
+  concat <$>
+  forM [ CS.propertyExpr p | p <- CS.specProperties spec, elem (CS.propertyName p) properties ] (\e ->
+    forM [ 0 .. maxBufLen ] (\i ->
+      do XBool b <- translateExpr sym mempty e (RelativeOffset i)
+         return b))
+ where
+  bufLen (CS.Stream _ buf _ _) = genericLength buf
+  maxBufLen = maximum (0 : (bufLen <$> CS.specStreams spec))
 
 --------------------------------------------------------------------------------
 -- What4 translation

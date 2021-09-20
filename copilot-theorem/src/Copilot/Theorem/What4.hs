@@ -763,6 +763,7 @@ translateOp1 sym op xe = case (op, xe) of
 
     -- TODO! add the other "unsafe" casts
     (XWord64 e, CT.Word32) -> XWord32 <$> WI.bvTrunc sym knownNat e
+    (XWord32 e, CT.Int32) -> return $ XInt32 e
 
     _ -> panic
   (CE.GetField (CT.Struct s) _ftp extractor, XStruct xes) -> do

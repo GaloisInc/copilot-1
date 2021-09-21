@@ -101,3 +101,5 @@ library
                           , Copilot.Theorem.TransSys.Operators
                           , Copilot.Theorem.TransSys.Type
 
+
+			  , Copilot.Theorem.What4.Translate

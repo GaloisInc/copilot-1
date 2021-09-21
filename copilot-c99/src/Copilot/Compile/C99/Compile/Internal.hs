@@ -7,6 +7,8 @@ module Copilot.Compile.C99.Compile.Internal
 import Text.PrettyPrint     (render)
 import Data.List            (nub)
 import Data.Maybe           (catMaybes)
+import System.Directory     (createDirectoryIfMissing)
+import System.FilePath      ((</>))
 
 import Language.C99.Pretty  (pretty)
 import qualified Language.C99.Simple as C
@@ -41,8 +43,14 @@ compileWith cSettings prefix spec = do
                         , ""
                         ]
 
-  writeFile (prefix ++ ".c") $ cmacros ++ cfile
-  writeFile (prefix ++ ".h") hfile
+  case cSettingsOutputDirectory cSettings of
+    Nothing ->
+      do writeFile (prefix ++ ".c") $ cmacros ++ cfile
+         writeFile (prefix ++ ".h") hfile
+    Just dir ->
+      do createDirectoryIfMissing True dir
+         writeFile (dir </> prefix ++ ".c") $ cmacros ++ cfile
+         writeFile (dir </> prefix ++ ".h") hfile
 
 -- | Compile a specification to a .h and a .c file.
 --

@@ -495,8 +495,9 @@ translateOp1 origExpr sym op xe = case (op, xe) of
     where recip :: FPOp1 fpp t
           recip e = do one <- WI.floatLit sym knownRepr (bfFromDouble 1.0)
                        WI.floatDiv sym fpRM one e
-  (CE.Exp _, xe) -> realOp (WI.realExp sym) xe
   (CE.Sqrt _, xe) -> fpOp (WI.floatSqrt sym fpRM) xe
+
+  (CE.Exp _, xe) -> realOp (WI.realExp sym) xe
   (CE.Log _, xe) -> realOp (WI.realLog sym) xe
   (CE.Sin _, xe) -> realOp (WI.realSin sym) xe
   (CE.Cos _, xe) -> realOp (WI.realCos sym) xe
@@ -538,7 +539,7 @@ translateOp1 origExpr sym op xe = case (op, xe) of
           XWord64 e -> XWord64 <$> bvOp e
           XFloat e -> XFloat <$> fpOp e
           XDouble e -> XDouble <$> fpOp e
-          _ -> panic [ "Unexpected value in numOp", show xe ] 
+          _ -> panic [ "Unexpected value in numOp", show xe ]
 
         bvOp :: (forall w . BVOp1 w t) -> XExpr t -> IO (XExpr t)
         bvOp f xe = case xe of
@@ -550,13 +551,13 @@ translateOp1 origExpr sym op xe = case (op, xe) of
           XWord16 e -> XWord16 <$> f e
           XWord32 e -> XWord32 <$> f e
           XWord64 e -> XWord64 <$> f e
-          _ -> panic [ "Unexpected value in bvOp", show xe ] 
+          _ -> panic [ "Unexpected value in bvOp", show xe ]
 
         fpOp :: (forall fpp . FPOp1 fpp t) -> XExpr t -> IO (XExpr t)
         fpOp g xe = case xe of
           XFloat e -> XFloat <$> g e
           XDouble e -> XDouble <$> g e
-          _ -> panic [ "Unexpected value in fpOp", show xe ] 
+          _ -> panic [ "Unexpected value in fpOp", show xe ]
 
         realOp :: RealOp1 t -> XExpr t -> IO (XExpr t)
         realOp h xe = fpOp hf xe
@@ -677,7 +678,7 @@ translateOp2 origExpr sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
   (CE.Index _, xe1, xe2) -> do
     case (xe1, xe2) of
       (XArray xes, XWord32 ix) -> buildIndexExpr sym 0 ix xes
-      _ -> panic ["Unexpected values in index operation", show xe1, show xe2] 
+      _ -> panic ["Unexpected values in index operation", show xe1, show xe2]
   _ -> panic [ "Unexpected values in binary op: "++ show (CP.ppExpr origExpr), show xe1, show xe2 ]
 
   where numOp :: (forall w . BVOp2 w t)
@@ -721,7 +722,7 @@ translateOp2 origExpr sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
         fpOp op xe1 xe2 = case (xe1, xe2) of
           (XFloat e1, XFloat e2) -> XFloat <$> op e1 e2
           (XDouble e1, XDouble e2) -> XDouble <$> op e1 e2
-          _ -> panic ["Unexpected values in fpOp", show xe1, show xe2] 
+          _ -> panic ["Unexpected values in fpOp", show xe1, show xe2]
 
         cmp :: BoolCmp2 t
             -> (forall w . BVCmp2 w t)
@@ -780,7 +781,7 @@ translateOp3 origExpr _sym _op xe1 xe2 xe3 =
 
 
 buildIndexExpr :: 1 <= n =>
-  WB.ExprBuilder t st fs -> 
+  WB.ExprBuilder t st fs ->
   Word32 {- ^ Index -} ->
   WB.Expr t (WT.BaseBVType 32) {- ^ Index -} ->
   V.Vector n (XExpr t) {- ^ Elements -} ->
@@ -815,13 +816,14 @@ mkIte sym pred xe1 xe2 = case (xe1, xe2) of
       (XDouble e1, XDouble e2) -> XDouble <$> WI.floatIte sym pred e1 e2
       (XStruct xes1, XStruct xes2) ->
         XStruct <$> zipWithM (mkIte sym pred) xes1 xes2
+      (XEmptyArray, XEmptyArray) -> return XEmptyArray
       (XArray xes1, XArray xes2) ->
         case V.length xes1 `testEquality` V.length xes2 of
           Just Refl -> XArray <$> V.zipWithM (mkIte sym pred) xes1 xes2
           Nothing -> panic ["Array length mismatch in ite", show (V.length xes1), show (V.length xes2)]
       _ -> panic ["Unexpected values in ite", show xe1, show xe2]
 
-castOp :: 
+castOp ::
   CE.Expr a ->
   WB.ExprBuilder t st fs ->
   CT.Type a ->
@@ -868,8 +870,56 @@ castOp origExpr sym tp xe = case (xe, tp) of
    (XWord64 _, CT.Word64) -> return xe
 
    -- "unsafe" casts, which may lose information
-   -- TODO! add the other "unsafe" casts
+   -- unsigned truncations
    (XWord64 e, CT.Word32) -> XWord32 <$> WI.bvTrunc sym knownNat e
+   (XWord64 e, CT.Word16) -> XWord16 <$> WI.bvTrunc sym knownNat e
+   (XWord64 e, CT.Word8)  -> XWord8  <$> WI.bvTrunc sym knownNat e
+   (XWord32 e, CT.Word16) -> XWord16 <$> WI.bvTrunc sym knownNat e
+   (XWord32 e, CT.Word8)  -> XWord8  <$> WI.bvTrunc sym knownNat e
+   (XWord16 e, CT.Word8)  -> XWord8  <$> WI.bvTrunc sym knownNat e
+
+   -- signed truncations
+   (XInt64 e, CT.Int32)   -> XInt32  <$> WI.bvTrunc sym knownNat e
+   (XInt64 e, CT.Int16)   -> XInt16  <$> WI.bvTrunc sym knownNat e
+   (XInt64 e, CT.Int8)    -> XInt8   <$> WI.bvTrunc sym knownNat e
+   (XInt32 e, CT.Int16)   -> XInt16  <$> WI.bvTrunc sym knownNat e
+   (XInt32 e, CT.Int8)    -> XInt8   <$> WI.bvTrunc sym knownNat e
+   (XInt16 e, CT.Int8)    -> XInt8   <$> WI.bvTrunc sym knownNat e
+
+   -- signed integer to float
+   (XInt64 e, CT.Float)   -> XFloat  <$> WI.sbvToFloat sym knownRepr fpRM e
+   (XInt32 e, CT.Float)   -> XFloat  <$> WI.sbvToFloat sym knownRepr fpRM e
+   (XInt16 e, CT.Float)   -> XFloat  <$> WI.sbvToFloat sym knownRepr fpRM e
+   (XInt8 e, CT.Float)    -> XFloat  <$> WI.sbvToFloat sym knownRepr fpRM e
+
+   -- unsigned integer to float
+   (XWord64 e, CT.Float)  -> XFloat  <$> WI.bvToFloat sym knownRepr fpRM e
+   (XWord32 e, CT.Float)  -> XFloat  <$> WI.bvToFloat sym knownRepr fpRM e
+   (XWord16 e, CT.Float)  -> XFloat  <$> WI.bvToFloat sym knownRepr fpRM e
+   (XWord8 e, CT.Float)   -> XFloat  <$> WI.bvToFloat sym knownRepr fpRM e
+
+   -- signed integer to double
+   (XInt64 e, CT.Double)  -> XDouble <$> WI.sbvToFloat sym knownRepr fpRM e
+   (XInt32 e, CT.Double)  -> XDouble <$> WI.sbvToFloat sym knownRepr fpRM e
+   (XInt16 e, CT.Double)  -> XDouble <$> WI.sbvToFloat sym knownRepr fpRM e
+   (XInt8 e, CT.Double)   -> XDouble <$> WI.sbvToFloat sym knownRepr fpRM e
+
+   -- unsigned integer to double
+   (XWord64 e, CT.Double) -> XDouble <$> WI.bvToFloat sym knownRepr fpRM e
+   (XWord32 e, CT.Double) -> XDouble <$> WI.bvToFloat sym knownRepr fpRM e
+   (XWord16 e, CT.Double) -> XDouble <$> WI.bvToFloat sym knownRepr fpRM e
+   (XWord8 e, CT.Double)  -> XDouble <$> WI.bvToFloat sym knownRepr fpRM e
+
+   -- unsigned to signed conversion
+   (XWord64 e, CT.Int64)  -> return $ XInt64 e
    (XWord32 e, CT.Int32)  -> return $ XInt32 e
+   (XWord16 e, CT.Int16)  -> return $ XInt16 e
+   (XWord8 e,  CT.Int8)   -> return $ XInt8 e
+
+   -- signed to unsigned conversion
+   (XInt64 e, CT.Word64)  -> return $ XWord64 e
+   (XInt32 e, CT.Word32)  -> return $ XWord32 e
+   (XInt16 e, CT.Word16)  -> return $ XWord16 e
+   (XInt8 e, CT.Word8)    -> return $ XWord8 e
 
    _ -> panic [ "Could not compute cast", show (CP.ppExpr origExpr), show xe ]

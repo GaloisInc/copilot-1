@@ -24,12 +24,29 @@
 
 -- Notes from Ben
 --    Distrust floats...
---    signed/unsigned bitvector stuff, see below
 
-module Copilot.Theorem.What4.Translate where
+module Copilot.Theorem.What4.Translate
+  ( XExpr(..)
+  , TransM
+  , TransState(..)
+  , runTransM
+  , panic
+  , valFromExpr
+  , CopilotValue(..)
+  , BuilderState(..)
+
+  , StreamOffset(..)
+  , LocalEnv
+  , translateExpr
+  , translateConstExpr
+  , getStreamValue
+  , getExternConstant
+  )
+where
 
 import qualified Copilot.Core.Expr       as CE
 import qualified Copilot.Core.Operators  as CE
+import qualified Copilot.Core.PrettyPrint as CP
 import qualified Copilot.Core.Spec       as CS
 import qualified Copilot.Core.Type       as CT
 import qualified Copilot.Core.Type.Array as CT
@@ -39,7 +56,6 @@ import qualified What4.Expr.GroundEval  as WG
 import qualified What4.Interface        as WI
 import qualified What4.BaseTypes        as WT
 
-import qualified Control.Monad.Fail as Fail
 import Control.Monad.State
 import qualified Data.BitVector.Sized as BV
 import Data.IORef (newIORef, readIORef, modifyIORef)
@@ -70,11 +86,25 @@ data BuilderState a = EmptyState
 
 -- What4 translation
 
+-- | Streams expressions are evaluated in two possible modes.
+--   The \"absolute\" mode computes the value of a stream expression
+--   relative to the beginning of time @t=0@.  The \"relative\" mode is
+--   useful for inductive proofs and the offset values are conceptually relative to
+--   some arbitrary, but fixed, index @j>=0@.  In both cases, negative indexes
+--   are not allowed.
+--
+--   The main difference between these modes is the interpretation of streams
+--   for the first values, which are in the \"buffer\" range.  For absolute
+--   indices, the actual fixed values for the streams are returned; for relative
+--   indices, uninterpreted values are generated for the values in the stream buffer.
+--   For both modes, stream values after their buffer region are defined by their
+--   recurrence expression.
 data StreamOffset
   = AbsoluteOffset !Integer
   | RelativeOffset !Integer
  deriving (Eq, Ord, Show)
 
+-- | Increment a stream offset by a drop amount.
 addOffset :: StreamOffset -> CE.DropIdx -> StreamOffset
 addOffset (AbsoluteOffset i) j = AbsoluteOffset (i + toInteger j)
 addOffset (RelativeOffset i) j = RelativeOffset (i + toInteger j)
@@ -96,11 +126,16 @@ data TransState t = TransState {
   -- | Map keeping track of all external variables encountered during translation.
   mentionedExternals :: Map.Map CE.Name (Some CT.Type),
 
+  -- | Memo table for external variables, indexed by the external stream name
+  --   and a stream offset.
   externVars :: Map.Map (CE.Name, StreamOffset) (XExpr t),
 
+  -- | Memo table for stream values, indexed by the stream Id and offset.
   streamValues :: Map.Map (CE.Id, StreamOffset) (XExpr t),
 
+  -- | A cache to look up stream definitions by their Id.
   streams :: Map.Map CE.Id CS.Stream,
+
   -- | Binary power operator, represented as an uninterpreted function.
   pow :: WB.ExprSymFn t
          (EmptyCtx ::> WT.BaseRealType ::> WT.BaseRealType)
@@ -119,9 +154,6 @@ newtype TransM t a = TransM { unTransM :: StateT (TransState t) IO a }
            , MonadState (TransState t)
            )
 
-instance Fail.MonadFail (TransM t) where
-  fail = error
-
 data CopilotWhat4 = CopilotWhat4
 
 instance Panic.PanicComponent CopilotWhat4 where
@@ -133,9 +165,8 @@ instance Panic.PanicComponent CopilotWhat4 where
 
 -- | Use this function rather than an error monad since it indicates that
 -- copilot-core's "reify" function did something incorrectly.
-panic :: MonadIO m => m a
-panic = Panic.panic CopilotWhat4 "Copilot.Theorem.What4"
-        [ "Ill-typed core expression" ]
+panic :: (Panic.HasCallStack, MonadIO m) => [String] -> m a
+panic msg = Panic.panic CopilotWhat4 "Ill-typed core expression" msg
 
 runTransM :: WB.ExprBuilder t st fs -> CS.Spec -> TransM t a -> IO a
 runTransM sym spec m =
@@ -176,12 +207,6 @@ data XExpr t where
   XEmptyArray :: XExpr t
   XArray      :: 1 <= n => V.Vector n (XExpr t) -> XExpr t
   XStruct     :: [XExpr t] -> XExpr t
-  -- XArray      :: NatRepr n
-  --             -> BaseTypeRepr tp
-  --             -> Some (WB.Expr t)
-  -- XStruct     :: Assignment BaseTypeRepr tps
-  --             -> WB.Expr t (BaseStructType tps)
-  --             -> XExpr t
 
 deriving instance Show (XExpr t)
 
@@ -192,10 +217,10 @@ data CopilotValue a = CopilotValue { cvType :: CT.Type a
 valFromExpr :: WG.GroundEvalFn t -> XExpr t -> IO (Some CopilotValue)
 valFromExpr ge xe = case xe of
   XBool e -> Some . CopilotValue CT.Bool <$> WG.groundEval ge e
-  XInt8 e -> Some . CopilotValue CT.Int8 . fromBV <$> WG.groundEval ge e
-  XInt16 e -> Some . CopilotValue CT.Int16 . fromBV <$> WG.groundEval ge e -- TODO! need signed version of fromBV
-  XInt32 e -> Some . CopilotValue CT.Int32 . fromBV <$> WG.groundEval ge e
-  XInt64 e -> Some . CopilotValue CT.Int64 . fromBV <$> WG.groundEval ge e
+  XInt8 e -> Some . CopilotValue CT.Int8 . fromSBV <$> WG.groundEval ge e
+  XInt16 e -> Some . CopilotValue CT.Int16 . fromSBV <$> WG.groundEval ge e
+  XInt32 e -> Some . CopilotValue CT.Int32 . fromSBV <$> WG.groundEval ge e
+  XInt64 e -> Some . CopilotValue CT.Int64 . fromSBV <$> WG.groundEval ge e
   XWord8 e -> Some . CopilotValue CT.Word8 . fromBV <$> WG.groundEval ge e
   XWord16 e -> Some . CopilotValue CT.Word16 . fromBV <$> WG.groundEval ge e
   XWord32 e -> Some . CopilotValue CT.Word32 . fromBV <$> WG.groundEval ge e
@@ -208,6 +233,9 @@ valFromExpr ge xe = case xe of
   where
     fromBV :: forall a w . Num a => BV.BV w -> a
     fromBV = fromInteger . BV.asUnsigned
+
+    fromSBV :: forall a w . (1 <= w, KnownNat w, Num a) => BV.BV w -> a
+    fromSBV = fromInteger . BV.asSigned knownRepr
 
 -- | A view of an XExpr as a bitvector expression, a natrepr for its width, its
 -- signed/unsigned status, and the constructor used to reconstruct an XExpr from
@@ -241,11 +269,11 @@ asBVExpr xe = case xe of
 
 -- | Translate a constant expression by creating a what4 literal and packaging
 -- it up into an 'XExpr'.
-translateConstExpr :: forall a t st fs .
-                      WB.ExprBuilder t st fs
-                   -> CT.Type a
-                   -> a
-                   -> IO (XExpr t)
+translateConstExpr :: forall a t st fs.
+  WB.ExprBuilder t st fs ->
+  CT.Type a ->
+  a ->
+  IO (XExpr t)
 translateConstExpr sym tp a = case tp of
   CT.Bool -> case a of
     True  -> return $ XBool (WI.truePred sym)
@@ -280,11 +308,11 @@ arrayLen _ = knownNat
 -- whenever we attempt to get the constant for a given external variable or
 -- stream variable, but that variable has not been accessed yet and therefore
 -- has no constant allocated.
-freshCPConstant :: forall t st fs a .
-                   WB.ExprBuilder t st fs
-                -> String
-                -> CT.Type a
-                -> IO (XExpr t)
+freshCPConstant :: forall t st fs a.
+  WB.ExprBuilder t st fs ->
+  String ->
+  CT.Type a ->
+  IO (XExpr t)
 freshCPConstant sym nm tp = case tp of
   CT.Bool -> XBool <$> WI.freshConstant sym (WI.safeSymbol nm) knownRepr
   CT.Int8 -> XInt8 <$> WI.freshConstant sym (WI.safeSymbol nm) knownRepr
@@ -317,52 +345,53 @@ getStreamValue sym streamId offset =
        Just xe -> return xe
        Nothing ->
          do streamDef <- getStreamDef streamId
-            xe <- computeStreamValue sym streamDef offset
+            xe <- computeStreamValue streamDef
             modify (\st -> st{ streamValues = Map.insert (streamId, offset) xe (streamValues st) })
             return xe
 
-computeStreamValue ::
-  WB.ExprBuilder t st fs -> CS.Stream -> StreamOffset -> TransM t (XExpr t)
-computeStreamValue
-  sym
-  CS.Stream
-   { CS.streamId = id, CS.streamBuffer = buf, CS.streamExpr = ex, CS.streamExprType = tp }
-  offset =
-  case offset of
-    AbsoluteOffset i
-      | i < 0     -> fail ("Invalid absolute offset " ++ show i ++ " for stream " ++ show id)
-      | i < len   -> liftIO (translateConstExpr sym tp (genericIndex buf i))
-      | otherwise -> translateExpr sym mempty ex (AbsoluteOffset (i - len))
-    RelativeOffset i
-      | i < 0     -> fail ("Invalid relative offset " ++ show i ++ " for stream " ++ show id)
-      | i < len   -> let nm = "s" ++ show id ++ "_r" ++ show i
-                     in liftIO (freshCPConstant sym nm tp)
-      | otherwise -> translateExpr sym mempty ex (RelativeOffset (i - len))
-
   where
-    len = genericLength buf
+  computeStreamValue
+     CS.Stream
+     { CS.streamId = id, CS.streamBuffer = buf, CS.streamExpr = ex, CS.streamExprType = tp } =
+     let len = genericLength buf in
+     case offset of
+       AbsoluteOffset i
+         | i < 0     -> panic ["Invalid absolute offset " ++ show i ++ " for stream " ++ show id]
+         | i < len   -> liftIO (translateConstExpr sym tp (genericIndex buf i))
+         | otherwise -> translateExpr sym mempty ex (AbsoluteOffset (i - len))
+       RelativeOffset i
+         | i < 0     -> panic ["Invalid relative offset " ++ show i ++ " for stream " ++ show id]
+         | i < len   -> let nm = "s" ++ show id ++ "_r" ++ show i
+                        in liftIO (freshCPConstant sym nm tp)
+         | otherwise -> translateExpr sym mempty ex (RelativeOffset (i - len))
+
 
 type LocalEnv t = Map.Map CE.Name (StreamOffset -> TransM t (XExpr t))
 
-translateExpr :: WB.ExprBuilder t st fs -> LocalEnv t -> CE.Expr a -> StreamOffset -> TransM t (XExpr t)
+translateExpr ::
+  WB.ExprBuilder t st fs ->
+  LocalEnv t ->
+  CE.Expr a ->
+  StreamOffset ->
+  TransM t (XExpr t)
 translateExpr sym localEnv e offset = case e of
   CE.Const tp a -> liftIO $ translateConstExpr sym tp a
   CE.Drop _tp ix streamId -> getStreamValue sym streamId (addOffset offset ix)
   CE.ExternVar tp nm _prefix -> getExternConstant sym tp nm offset
   CE.Op1 op e1 ->
     do xe1 <- translateExpr sym localEnv e1 offset
-       liftIO $ translateOp1 sym op xe1
+       liftIO $ translateOp1 e sym op xe1
   CE.Op2 op e1 e2 ->
     do xe1 <- translateExpr sym localEnv e1 offset
        xe2 <- translateExpr sym localEnv e2 offset
        powFn <- gets pow
        logbFn <- gets logb
-       liftIO $ translateOp2 sym powFn logbFn op xe1 xe2
+       liftIO $ translateOp2 e sym powFn logbFn op xe1 xe2
   CE.Op3 op e1 e2 e3 ->
     do xe1 <- translateExpr sym localEnv e1 offset
        xe2 <- translateExpr sym localEnv e2 offset
        xe3 <- translateExpr sym localEnv e3 offset
-       liftIO $ translateOp3 sym op xe1 xe2 xe3
+       liftIO $ translateOp3 e sym op xe1 xe2 xe3
   CE.Label _ _ e1 ->
     translateExpr sym localEnv e1 offset
   CE.Local _tpa _tpb nm e1 body ->
@@ -378,7 +407,7 @@ translateExpr sym localEnv e offset = case e of
        translateExpr sym localEnv' body offset
   CE.Var _tp nm ->
     case Map.lookup nm localEnv of
-      Nothing -> fail ("translateExpr: unknown var " ++ show nm)
+      Nothing -> panic ["translateExpr: unknown var " ++ show nm]
       Just f  -> f offset
 
 getExternConstant ::
@@ -388,24 +417,23 @@ getExternConstant sym tp nm offset =
      case Map.lookup (nm, offset) es of
        Just xe -> return xe
        Nothing -> do
-         xe <- computeExternConstant sym tp nm offset
+         xe <- computeExternConstant
          modify (\st -> st { externVars = Map.insert (nm, offset) xe (externVars st)
                            , mentionedExternals = Map.insert nm (Some tp) (mentionedExternals st)
                            } )
          return xe
+ where
+ computeExternConstant =
+    case offset of
+      AbsoluteOffset i
+        | i < 0     -> panic ["Invalid absolute offset " ++ show i ++ " for external stream " ++ nm]
+        | otherwise -> let nm' = nm ++ "_a" ++ show i
+                       in liftIO (freshCPConstant sym nm' tp)
+      RelativeOffset i
+        | i < 0     -> panic ["Invalid relative offset " ++ show i ++ " for external stream " ++ nm]
+        | otherwise -> let nm' = nm ++ "_r" ++ show i
+                       in liftIO (freshCPConstant sym nm' tp)
 
-computeExternConstant ::
-  WB.ExprBuilder t st fs -> CT.Type a -> CE.Name -> StreamOffset -> TransM t (XExpr t)
-computeExternConstant sym tp nm offset =
-  case offset of
-    AbsoluteOffset i
-      | i < 0     -> fail ("Invalid absolute offset " ++ show i ++ " for external stream " ++ nm)
-      | otherwise -> let nm' = nm ++ "_a" ++ show i
-                     in liftIO (freshCPConstant sym nm' tp)
-    RelativeOffset i
-      | i < 0     -> fail ("Invalid relative offset " ++ show i ++ " for external stream " ++ nm)
-      | otherwise -> let nm' = nm ++ "_r" ++ show i
-                     in liftIO (freshCPConstant sym nm' tp)
 
 -- | Retrieve a stream definition given its id.
 getStreamDef :: CE.Id -> TransM t CS.Stream
@@ -414,7 +442,9 @@ getStreamDef streamId = fromJust <$> gets (Map.lookup streamId . streams)
 
 type BVOp1 w t = (KnownNat w, 1 <= w) => WB.BVExpr t w -> IO (WB.BVExpr t w)
 
-type FPOp1 fpp t = KnownRepr WT.FloatPrecisionRepr fpp => WB.Expr t (WT.BaseFloatType fpp) -> IO (WB.Expr t (WT.BaseFloatType fpp))
+type FPOp1 fpp t =
+  KnownRepr WT.FloatPrecisionRepr fpp =>
+  WB.Expr t (WT.BaseFloatType fpp) -> IO (WB.Expr t (WT.BaseFloatType fpp))
 
 type RealOp1 t = WB.Expr t WT.BaseRealType -> IO (WB.Expr t WT.BaseRealType)
 
@@ -425,13 +455,14 @@ valueName :: CT.Value a -> Some SymbolRepr
 valueName (CT.Value _ f) = Some (fieldName f)
 
 translateOp1 :: forall t st fs a b .
-                WB.ExprBuilder t st fs
-             -> CE.Op1 a b
-             -> XExpr t
-             -> IO (XExpr t)
-translateOp1 sym op xe = case (op, xe) of
+  CE.Expr b ->
+  WB.ExprBuilder t st fs ->
+  CE.Op1 a b ->
+  XExpr t ->
+  IO (XExpr t)
+translateOp1 origExpr sym op xe = case (op, xe) of
   (CE.Not, XBool e) -> XBool <$> WI.notPred sym e
-  (CE.Not, _) -> panic
+  (CE.Not, _) -> panic ["Expected bool", show xe]
   (CE.Abs _, xe) -> numOp bvAbs fpAbs xe
     where
       bvAbs :: BVOp1 w t
@@ -485,56 +516,15 @@ translateOp1 sym op xe = case (op, xe) of
   (CE.BwNot _, xe) -> case xe of
     XBool e -> XBool <$> WI.notPred sym e
     _ -> bvOp (WI.bvNotBits sym) xe
-  (CE.Cast _ tp, xe) -> case (xe, tp) of
-    (XBool e, CT.Bool) -> return $ XBool e
-    (XBool e, CT.Word8) -> XWord8 <$> WI.predToBV sym e knownNat
-    (XBool e, CT.Word16) -> XWord16 <$> WI.predToBV sym e knownNat
-    (XBool e, CT.Word32) -> XWord32 <$> WI.predToBV sym e knownNat
-    (XBool e, CT.Word64) -> XWord64 <$> WI.predToBV sym e knownNat
-    (XBool e, CT.Int8) -> XInt8 <$> WI.predToBV sym e knownNat
-    (XBool e, CT.Int16) -> XInt16 <$> WI.predToBV sym e knownNat
-    (XBool e, CT.Int32) -> XInt32 <$> WI.predToBV sym e knownNat
-    (XBool e, CT.Int64) -> XInt64 <$> WI.predToBV sym e knownNat
-    (XInt8 e, CT.Int8) -> return $ XInt8 e
-    (XInt8 e, CT.Int16) -> XInt16 <$> WI.bvSext sym knownNat e
-    (XInt8 e, CT.Int32) -> XInt32 <$> WI.bvSext sym knownNat e
-    (XInt8 e, CT.Int64) -> XInt64 <$> WI.bvSext sym knownNat e
-    (XInt16 e, CT.Int16) -> return $ XInt16 e
-    (XInt16 e, CT.Int32) -> XInt32 <$> WI.bvSext sym knownNat e
-    (XInt16 e, CT.Int64) -> XInt64 <$> WI.bvSext sym knownNat e
-    (XInt32 e, CT.Int32) -> return $ XInt32 e
-    (XInt32 e, CT.Int64) -> XInt64 <$> WI.bvSext sym knownNat e
-    (XInt64 e, CT.Int64) -> return $ XInt64 e
-    (XWord8 e, CT.Int16) -> XInt16 <$> WI.bvZext sym knownNat e
-    (XWord8 e, CT.Int32) -> XInt32 <$> WI.bvZext sym knownNat e
-    (XWord8 e, CT.Int64) -> XInt64 <$> WI.bvZext sym knownNat e
-    (XWord8 e, CT.Word8) -> return $ XWord8 e
-    (XWord8 e, CT.Word16) -> XWord16 <$> WI.bvZext sym knownNat e
-    (XWord8 e, CT.Word32) -> XWord32 <$> WI.bvZext sym knownNat e
-    (XWord8 e, CT.Word64) -> XWord64 <$> WI.bvZext sym knownNat e
-    (XWord16 e, CT.Int32) -> XInt32 <$> WI.bvZext sym knownNat e
-    (XWord16 e, CT.Int64) -> XInt64 <$> WI.bvZext sym knownNat e
-    (XWord16 e, CT.Word16) -> return $ XWord16 e
-    (XWord16 e, CT.Word32) -> XWord32 <$> WI.bvZext sym knownNat e
-    (XWord16 e, CT.Word64) -> XWord64 <$> WI.bvZext sym knownNat e
-    (XWord32 e, CT.Int64) -> XInt64 <$> WI.bvZext sym knownNat e
-    (XWord32 e, CT.Word32) -> return $ XWord32 e
-    (XWord32 e, CT.Word64) -> XWord64 <$> WI.bvZext sym knownNat e
-    (XWord64 e, CT.Word64) -> return $ XWord64 e
-
-    -- TODO! add the other "unsafe" casts
-    (XWord64 e, CT.Word32) -> XWord32 <$> WI.bvTrunc sym knownNat e
-    (XWord32 e, CT.Int32) -> return $ XInt32 e
-
-    _ -> panic
+  (CE.Cast _ tp, _) -> castOp origExpr sym tp xe
   (CE.GetField (CT.Struct s) _ftp extractor, XStruct xes) -> do
     let fieldNameRepr = fieldName (extractor undefined)
     let structFieldNameReprs = valueName <$> CT.toValues s
     let mIx = elemIndex (Some fieldNameRepr) structFieldNameReprs
     case mIx of
       Just ix -> return $ xes !! ix
-      Nothing -> panic
-  _ -> panic
+      Nothing -> panic ["Could not find field " ++ show fieldNameRepr, show s ]
+  _ -> panic ["Unexpected value for op: " ++ show (CP.ppExpr origExpr), show xe ]
   where
     numOp :: (forall w . BVOp1 w t)
           -> (forall fpp . FPOp1 fpp t)
@@ -551,7 +541,7 @@ translateOp1 sym op xe = case (op, xe) of
       XWord64 e -> XWord64 <$> bvOp e
       XFloat e -> XFloat <$> fpOp e
       XDouble e -> XDouble <$> fpOp e
-      _ -> panic
+      _ -> panic [ "Unexpected value in numOp", show xe ]
 
     bvOp :: (forall w . BVOp1 w t) -> XExpr t -> IO (XExpr t)
     bvOp f xe = case xe of
@@ -563,13 +553,13 @@ translateOp1 sym op xe = case (op, xe) of
       XWord16 e -> XWord16 <$> f e
       XWord32 e -> XWord32 <$> f e
       XWord64 e -> XWord64 <$> f e
-      _ -> panic
+      _ -> panic [ "Unexpected value in bvOp", show xe ]
 
     fpOp :: (forall fpp . FPOp1 fpp t) -> XExpr t -> IO (XExpr t)
     fpOp g xe = case xe of
       XFloat e -> XFloat <$> g e
       XDouble e -> XDouble <$> g e
-      _ -> panic
+      _ -> panic [ "Unexpected value in fpOp", show xe ]
 
     realOp :: RealOp1 t -> XExpr t -> IO (XExpr t)
     realOp h xe = fpOp hf xe
@@ -583,9 +573,14 @@ translateOp1 sym op xe = case (op, xe) of
     realRecip e = do one <- WI.realLit sym 1
                      WI.realDiv sym one e
 
-type BVOp2 w t = (KnownNat w, 1 <= w) => WB.BVExpr t w -> WB.BVExpr t w -> IO (WB.BVExpr t w)
+type BVOp2 w t = (KnownNat w, 1 <= w) =>
+  WB.BVExpr t w -> WB.BVExpr t w -> IO (WB.BVExpr t w)
 
-type FPOp2 fpp t = KnownRepr WT.FloatPrecisionRepr fpp => WB.Expr t (WT.BaseFloatType fpp) -> WB.Expr t (WT.BaseFloatType fpp) -> IO (WB.Expr t (WT.BaseFloatType fpp))
+type FPOp2 fpp t =
+  KnownRepr WT.FloatPrecisionRepr fpp =>
+  WB.Expr t (WT.BaseFloatType fpp) ->
+  WB.Expr t (WT.BaseFloatType fpp) ->
+  IO (WB.Expr t (WT.BaseFloatType fpp))
 
 type RealOp2 t = WB.Expr t WT.BaseRealType -> WB.Expr t WT.BaseRealType -> IO (WB.Expr t WT.BaseRealType)
 
@@ -593,23 +588,28 @@ type BoolCmp2 t = WB.BoolExpr t -> WB.BoolExpr t -> IO (WB.BoolExpr t)
 
 type BVCmp2 w t = (KnownNat w, 1 <= w) => WB.BVExpr t w -> WB.BVExpr t w -> IO (WB.BoolExpr t)
 
-type FPCmp2 fpp t = KnownRepr WT.FloatPrecisionRepr fpp => WB.Expr t (WT.BaseFloatType fpp) -> WB.Expr t (WT.BaseFloatType fpp) -> IO (WB.BoolExpr t)
+type FPCmp2 fpp t =
+  KnownRepr WT.FloatPrecisionRepr fpp =>
+  WB.Expr t (WT.BaseFloatType fpp) ->
+  WB.Expr t (WT.BaseFloatType fpp) ->
+  IO (WB.BoolExpr t)
 
 translateOp2 :: forall t st fs a b c .
-                WB.ExprBuilder t st fs
-             -> (WB.ExprSymFn t
-                 (EmptyCtx ::> WT.BaseRealType ::> WT.BaseRealType)
-                 WT.BaseRealType)
-             -- ^ Pow function
-             -> (WB.ExprSymFn t
-                 (EmptyCtx ::> WT.BaseRealType ::> WT.BaseRealType)
-                 WT.BaseRealType)
-             -- ^ Logb function
-             -> CE.Op2 a b c
-             -> XExpr t
-             -> XExpr t
-             -> IO (XExpr t)
-translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
+   CE.Expr c ->
+   WB.ExprBuilder t st fs ->
+   (WB.ExprSymFn t
+       (EmptyCtx ::> WT.BaseRealType ::> WT.BaseRealType)
+       WT.BaseRealType)
+     {- ^ Pow function -} ->
+   (WB.ExprSymFn t
+       (EmptyCtx ::> WT.BaseRealType ::> WT.BaseRealType)
+       WT.BaseRealType)
+     {- ^ Logb function -} ->
+   CE.Op2 a b c ->
+   XExpr t ->
+   XExpr t ->
+   IO (XExpr t)
+translateOp2 origExpr sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
   (CE.And, XBool e1, XBool e2) -> XBool <$> WI.andPred sym e1 e2
   (CE.Or, XBool e1, XBool e2) -> XBool <$> WI.orPred sym e1 e2
   (CE.Add _, xe1, xe2) -> numOp (WI.bvAdd sym) (WI.floatAdd sym fpRM) xe1 xe2
@@ -673,6 +673,7 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
     ctor1 <$> case sgn1 of
       Signed -> WI.bvAshr sym e1 e2'
       Unsigned -> WI.bvLshr sym e1 e2'
+
   -- Note: Currently, copilot does not check if array indices are out of bounds,
   -- even for constant expressions. The method of translation we are using
   -- simply creates a nest of if-then-else expression to check the index
@@ -683,8 +684,9 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
   (CE.Index _, xe1, xe2) -> do
     case (xe1, xe2) of
       (XArray xes, XWord32 ix) -> buildIndexExpr sym 0 ix xes
-      _ -> panic
-  _ -> panic
+      _ -> panic ["Unexpected values in index operation", show xe1, show xe2]
+  _ -> panic [ "Unexpected values in binary op: "++ show (CP.ppExpr origExpr), show xe1, show xe2 ]
+
   where
     numOp :: (forall w . BVOp2 w t)
           -> (forall fpp . FPOp2 fpp t)
@@ -702,7 +704,7 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
       (XWord64 e1, XWord64 e2)-> XWord64 <$> bvOp e1 e2
       (XFloat e1, XFloat e2)-> XFloat <$> fpOp e1 e2
       (XDouble e1, XDouble e2)-> XDouble <$> fpOp e1 e2
-      _ -> panic
+      _ -> panic ["Unexpected values in numOp", show xe1, show xe2]
 
     bvOp :: (forall w . BVOp2 w t)
          -> (forall w . BVOp2 w t)
@@ -718,7 +720,7 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
       (XWord16 e1, XWord16 e2) -> XWord16 <$> opU e1 e2
       (XWord32 e1, XWord32 e2) -> XWord32 <$> opU e1 e2
       (XWord64 e1, XWord64 e2) -> XWord64 <$> opU e1 e2
-      _ -> panic
+      _ -> panic ["Unexpected values in bvOp", show xe1, show xe2]
 
     fpOp :: (forall fpp . FPOp2 fpp t)
          -> XExpr t
@@ -727,7 +729,7 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
     fpOp op xe1 xe2 = case (xe1, xe2) of
       (XFloat e1, XFloat e2) -> XFloat <$> op e1 e2
       (XDouble e1, XDouble e2) -> XDouble <$> op e1 e2
-      _ -> panic
+      _ -> panic ["Unexpected values in fpOp", show xe1, show xe2]
 
     cmp :: BoolCmp2 t
         -> (forall w . BVCmp2 w t)
@@ -747,7 +749,7 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
       (XWord64 e1, XWord64 e2)-> XBool <$> bvOp e1 e2
       (XFloat e1, XFloat e2)-> XBool <$> fpOp e1 e2
       (XDouble e1, XDouble e2)-> XBool <$> fpOp e1 e2
-      _ -> panic
+      _ -> panic ["Unexpected values in cmp", show xe1, show xe2 ]
 
     numCmp :: (forall w . BVCmp2 w t)
            -> (forall w . BVCmp2 w t)
@@ -766,69 +768,112 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
       (XWord64 e1, XWord64 e2)-> XBool <$> bvUOp e1 e2
       (XFloat e1, XFloat e2)-> XBool <$> fpOp e1 e2
       (XDouble e1, XDouble e2)-> XBool <$> fpOp e1 e2
-      _ -> panic
-
-    buildIndexExpr :: 1 <= n
-                   => WB.ExprBuilder t st fs
-                   -> Word32
-                   -- ^ Index
-                   -> WB.Expr t (WT.BaseBVType 32)
-                   -- ^ Index
-                   -> V.Vector n (XExpr t)
-                   -- ^ Elements
-                   -> IO (XExpr t)
-    buildIndexExpr sym curIx ix xelts = case V.uncons xelts of
-      (xe, Left Refl) -> return xe
-      (xe, Right xelts') -> do
-        LeqProof <- return $ V.nonEmpty xelts'
-        rstExpr <- buildIndexExpr sym (curIx+1) ix xelts'
-        curIxExpr <- WI.bvLit sym knownNat (BV.word32 curIx)
-        ixEq <- WI.bvEq sym curIxExpr ix
-        mkIte sym ixEq xe rstExpr
-
-    mkIte :: WB.ExprBuilder t st fs
-          -> WB.Expr t WT.BaseBoolType
-          -> XExpr t
-          -> XExpr t
-          -> IO (XExpr t)
-    mkIte sym pred xe1 xe2 = case (xe1, xe2) of
-          (XBool e1, XBool e2) -> XBool <$> WI.itePred sym pred e1 e2
-          (XInt8 e1, XInt8 e2) -> XInt8 <$> WI.bvIte sym pred e1 e2
-          (XInt16 e1, XInt16 e2) -> XInt16 <$> WI.bvIte sym pred e1 e2
-          (XInt32 e1, XInt32 e2) -> XInt32 <$> WI.bvIte sym pred e1 e2
-          (XInt64 e1, XInt64 e2) -> XInt64 <$> WI.bvIte sym pred e1 e2
-          (XWord8 e1, XWord8 e2) -> XWord8 <$> WI.bvIte sym pred e1 e2
-          (XWord16 e1, XWord16 e2) -> XWord16 <$> WI.bvIte sym pred e1 e2
-          (XWord32 e1, XWord32 e2) -> XWord32 <$> WI.bvIte sym pred e1 e2
-          (XWord64 e1, XWord64 e2) -> XWord64 <$> WI.bvIte sym pred e1 e2
-          (XFloat e1, XFloat e2) -> XFloat <$> WI.floatIte sym pred e1 e2
-          (XDouble e1, XDouble e2) -> XDouble <$> WI.floatIte sym pred e1 e2
-          (XStruct xes1, XStruct xes2) ->
-            XStruct <$> zipWithM (mkIte sym pred) xes1 xes2
-          (XArray xes1, XArray xes2) ->
-            case V.length xes1 `testEquality` V.length xes2 of
-              Just Refl -> XArray <$> V.zipWithM (mkIte sym pred) xes1 xes2
-              Nothing -> panic
-          _ -> panic
+      _ -> panic ["Unexpected values in numCmp", show xe1, show xe2]
 
 translateOp3 :: forall t st fs a b c d .
-                WB.ExprBuilder t st fs
-             -> CE.Op3 a b c d
-             -> XExpr t
-             -> XExpr t
-             -> XExpr t
-             -> IO (XExpr t)
-translateOp3 sym (CE.Mux _) (XBool te) xe1 xe2 = case (xe1, xe2) of
-  (XBool e1, XBool e2) -> XBool <$> WI.itePred sym te e1 e2
-  (XInt8 e1, XInt8 e2) -> XInt8 <$> WI.bvIte sym te e1 e2
-  (XInt16 e1, XInt16 e2) -> XInt16 <$> WI.bvIte sym te e1 e2
-  (XInt32 e1, XInt32 e2) -> XInt32 <$> WI.bvIte sym te e1 e2
-  (XInt64 e1, XInt64 e2) -> XInt64 <$> WI.bvIte sym te e1 e2
-  (XWord8 e1, XWord8 e2) -> XWord8 <$> WI.bvIte sym te e1 e2
-  (XWord16 e1, XWord16 e2) -> XWord16 <$> WI.bvIte sym te e1 e2
-  (XWord32 e1, XWord32 e2) -> XWord32 <$> WI.bvIte sym te e1 e2
-  (XWord64 e1, XWord64 e2) -> XWord64 <$> WI.bvIte sym te e1 e2
-  (XFloat e1, XFloat e2) -> XFloat <$> WI.floatIte sym te e1 e2
-  (XDouble e1, XDouble e2) -> XDouble <$> WI.floatIte sym te e1 e2
-  _ -> panic
-translateOp3 _ _ _ _ _ = panic
+  CE.Expr d ->
+  WB.ExprBuilder t st fs ->
+  CE.Op3 a b c d ->
+  XExpr t ->
+  XExpr t ->
+  XExpr t ->
+  IO (XExpr t)
+translateOp3 _ sym (CE.Mux _) (XBool te) xe1 xe2 = mkIte sym te xe1 xe2
+translateOp3 origExpr _sym _op xe1 xe2 xe3 =
+  panic ["Unexpected values in 3-place op"
+        , show (CP.ppExpr origExpr), show xe1, show xe2, show xe3
+        ]
+
+buildIndexExpr :: 1 <= n =>
+  WB.ExprBuilder t st fs ->
+  Word32 {- ^ Index -} ->
+  WB.Expr t (WT.BaseBVType 32) {- ^ Index -} ->
+  V.Vector n (XExpr t) {- ^ Elements -} ->
+  IO (XExpr t)
+buildIndexExpr sym curIx ix xelts = case V.uncons xelts of
+  (xe, Left Refl) -> return xe
+  (xe, Right xelts') -> do
+    LeqProof <- return $ V.nonEmpty xelts'
+    rstExpr <- buildIndexExpr sym (curIx+1) ix xelts'
+    curIxExpr <- WI.bvLit sym knownNat (BV.word32 curIx)
+    ixEq <- WI.bvEq sym curIxExpr ix
+    mkIte sym ixEq xe rstExpr
+
+mkIte ::
+  WB.ExprBuilder t st fs ->
+  WB.Expr t WT.BaseBoolType ->
+  XExpr t ->
+  XExpr t ->
+  IO (XExpr t)
+mkIte sym pred xe1 xe2 = case (xe1, xe2) of
+      (XBool e1, XBool e2) -> XBool <$> WI.itePred sym pred e1 e2
+      (XInt8 e1, XInt8 e2) -> XInt8 <$> WI.bvIte sym pred e1 e2
+      (XInt16 e1, XInt16 e2) -> XInt16 <$> WI.bvIte sym pred e1 e2
+      (XInt32 e1, XInt32 e2) -> XInt32 <$> WI.bvIte sym pred e1 e2
+      (XInt64 e1, XInt64 e2) -> XInt64 <$> WI.bvIte sym pred e1 e2
+      (XWord8 e1, XWord8 e2) -> XWord8 <$> WI.bvIte sym pred e1 e2
+      (XWord16 e1, XWord16 e2) -> XWord16 <$> WI.bvIte sym pred e1 e2
+      (XWord32 e1, XWord32 e2) -> XWord32 <$> WI.bvIte sym pred e1 e2
+      (XWord64 e1, XWord64 e2) -> XWord64 <$> WI.bvIte sym pred e1 e2
+      (XFloat e1, XFloat e2) -> XFloat <$> WI.floatIte sym pred e1 e2
+      (XDouble e1, XDouble e2) -> XDouble <$> WI.floatIte sym pred e1 e2
+      (XStruct xes1, XStruct xes2) ->
+        XStruct <$> zipWithM (mkIte sym pred) xes1 xes2
+      (XArray xes1, XArray xes2) ->
+        case V.length xes1 `testEquality` V.length xes2 of
+          Just Refl -> XArray <$> V.zipWithM (mkIte sym pred) xes1 xes2
+          Nothing -> panic ["Array length mismatch in ite", show (V.length xes1), show (V.length xes2)]
+      _ -> panic ["Unexpected values in ite", show xe1, show xe2]
+
+castOp ::
+  CE.Expr a ->
+  WB.ExprBuilder t st fs ->
+  CT.Type a ->
+  XExpr t ->
+  IO (XExpr t)
+castOp origExpr sym tp xe = case (xe, tp) of
+   -- "safe" casts that cannot lose information
+   (XBool _, CT.Bool)     -> return xe
+   (XBool e, CT.Word8)    -> XWord8  <$> WI.predToBV sym e knownNat
+   (XBool e, CT.Word16)   -> XWord16 <$> WI.predToBV sym e knownNat
+   (XBool e, CT.Word32)   -> XWord32 <$> WI.predToBV sym e knownNat
+   (XBool e, CT.Word64)   -> XWord64 <$> WI.predToBV sym e knownNat
+   (XBool e, CT.Int8)     -> XInt8   <$> WI.predToBV sym e knownNat
+   (XBool e, CT.Int16)    -> XInt16  <$> WI.predToBV sym e knownNat
+   (XBool e, CT.Int32)    -> XInt32  <$> WI.predToBV sym e knownNat
+   (XBool e, CT.Int64)    -> XInt64  <$> WI.predToBV sym e knownNat
+
+   (XInt8 _, CT.Int8)     -> return xe
+   (XInt8 e, CT.Int16)    -> XInt16  <$> WI.bvSext sym knownNat e
+   (XInt8 e, CT.Int32)    -> XInt32  <$> WI.bvSext sym knownNat e
+   (XInt8 e, CT.Int64)    -> XInt64  <$> WI.bvSext sym knownNat e
+   (XInt16 _, CT.Int16)   -> return xe
+   (XInt16 e, CT.Int32)   -> XInt32  <$> WI.bvSext sym knownNat e
+   (XInt16 e, CT.Int64)   -> XInt64  <$> WI.bvSext sym knownNat e
+   (XInt32 _, CT.Int32)   -> return xe
+   (XInt32 e, CT.Int64)   -> XInt64  <$> WI.bvSext sym knownNat e
+   (XInt64 _, CT.Int64)   -> return xe
+
+   (XWord8 e, CT.Int16)   -> XInt16  <$> WI.bvZext sym knownNat e
+   (XWord8 e, CT.Int32)   -> XInt32  <$> WI.bvZext sym knownNat e
+   (XWord8 e, CT.Int64)   -> XInt64  <$> WI.bvZext sym knownNat e
+   (XWord8 _, CT.Word8)   -> return xe
+   (XWord8 e, CT.Word16)  -> XWord16 <$> WI.bvZext sym knownNat e
+   (XWord8 e, CT.Word32)  -> XWord32 <$> WI.bvZext sym knownNat e
+   (XWord8 e, CT.Word64)  -> XWord64 <$> WI.bvZext sym knownNat e
+   (XWord16 e, CT.Int32)  -> XInt32  <$> WI.bvZext sym knownNat e
+   (XWord16 e, CT.Int64)  -> XInt64  <$> WI.bvZext sym knownNat e
+   (XWord16 _, CT.Word16) -> return xe
+   (XWord16 e, CT.Word32) -> XWord32 <$> WI.bvZext sym knownNat e
+   (XWord16 e, CT.Word64) -> XWord64 <$> WI.bvZext sym knownNat e
+   (XWord32 e, CT.Int64)  -> XInt64  <$> WI.bvZext sym knownNat e
+   (XWord32 _, CT.Word32) -> return xe
+   (XWord32 e, CT.Word64) -> XWord64 <$> WI.bvZext sym knownNat e
+   (XWord64 _, CT.Word64) -> return xe
+
+   -- "unsafe" casts, which may lose information
+   -- TODO! add the other "unsafe" casts
+   (XWord64 e, CT.Word32) -> XWord32 <$> WI.bvTrunc sym knownNat e
+   (XWord32 e, CT.Int32)  -> return $ XInt32 e
+
+   _ -> panic [ "Could not compute cast", show (CP.ppExpr origExpr), show xe ]

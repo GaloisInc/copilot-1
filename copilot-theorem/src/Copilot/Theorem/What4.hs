@@ -58,9 +58,17 @@
 -- to simply interpreting the spec, although external variables are still
 -- represented as constants with unknown values.
 
-module Copilot.Theorem.What4 where
---  ( prove, Solver(..), SatResult(..)
---  ) where
+module Copilot.Theorem.What4
+  ( Solver(..)
+  , SatResult(..)
+  , prove
+
+  , BisimulationProofState(..)
+  , BisimulationProofBundle(..)
+  , computeBisimulationProofBundle
+
+  , module Copilot.Theorem.What4.Translate
+  ) where
 
 import qualified Copilot.Core.Expr as CE
 import qualified Copilot.Core.Spec as CS
@@ -124,16 +132,20 @@ prove solver spec = do
         let bufLen (CS.Stream _ buf _ _) = genericLength buf
             maxBufLen = maximum (0 : (bufLen <$> CS.specStreams spec))
         prefix <- forM [0 .. maxBufLen - 1] $ \k -> do
-          XBool p <- translateExpr sym mempty (CS.propertyExpr pr) (AbsoluteOffset k)
-          return p
+          translateExpr sym mempty (CS.propertyExpr pr) (AbsoluteOffset k) >>= \case
+            XBool p -> return p
+            xe -> panic ["Property expected to have boolean result", show xe]
 
         -- translate the induction hypothesis for all values up to maxBufLen in the past
         ind_hyps <- forM [0 .. maxBufLen-1] $ \k -> do
-          XBool hyp <- translateExpr sym mempty (CS.propertyExpr pr) (RelativeOffset k)
-          return hyp
+          translateExpr sym mempty (CS.propertyExpr pr) (RelativeOffset k) >>= \case
+            XBool hyp -> return hyp
+            xe -> panic ["Property expected to have boolean result", show xe]
 
         -- translate the predicate for the "current" value
-        XBool p <- translateExpr sym mempty (CS.propertyExpr pr) (RelativeOffset maxBufLen)
+        p <- translateExpr sym mempty (CS.propertyExpr pr) (RelativeOffset maxBufLen) >>= \case
+               XBool p -> return p
+               xe -> panic ["Property expected to have boolean result", show xe]
 
         -- compute the predicate (ind_hyps ==> p)
         p' <- liftIO $ foldrM (WI.impliesPred sym) p ind_hyps
@@ -247,7 +259,9 @@ computeTriggerState ::
   TransM t [(CE.Name, WB.BoolExpr t, [(Some CT.Type, XExpr t)])]
 computeTriggerState sym spec = forM (CS.specTriggers spec) $
     \CS.Trigger{ CS.triggerName = nm, CS.triggerGuard = guard, CS.triggerArgs = args } ->
-      do XBool guard' <- translateExpr sym mempty guard (RelativeOffset 0)
+      do guard' <- translateExpr sym mempty guard (RelativeOffset 0) >>= \case
+                     XBool guard' -> return guard'
+                     xe -> panic ["Trigger guard expected to have boolean result", show xe]
          args' <- mapM computeArg args
          return (nm, guard', args')
   where
@@ -273,8 +287,9 @@ computeAssumptions sym properties spec =
   concat <$>
   forM [ CS.propertyExpr p | p <- CS.specProperties spec, elem (CS.propertyName p) properties ] (\e ->
     forM [ 0 .. maxBufLen ] (\i ->
-      do XBool b <- translateExpr sym mempty e (RelativeOffset i)
-         return b))
+      translateExpr sym mempty e (RelativeOffset i) >>= \case
+        XBool b -> return b
+        xe -> panic ["Property expected to have boolean result", show xe]))
  where
   bufLen (CS.Stream _ buf _ _) = genericLength buf
   maxBufLen = maximum (0 : (bufLen <$> CS.specStreams spec))

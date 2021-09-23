@@ -26,38 +26,16 @@
 -- @What4@. A backend solver is then used to prove the property is true. The
 -- technique is sound, but incomplete. If a property is proved true by this
 -- technique, then it can be guaranteed to be true. However, if a property is
--- not proved true, that does not mean it isn't true. Very simple specifications
--- are unprovable by this technique, including:
+-- not proved true, that does not mean it isn't true; the proof may fail
+-- because the given property is not inductive.
 --
--- @
--- a = True : a
--- @
+-- We perform @k@-induction on all the properties in a given specifiaction where
+-- @k@ is chosen to be the maximum amount of delay on any of the involved streams.
+-- This is a heuristic choice, but often effective.
 --
--- The above specification will not be proved true. The reason is that this
--- technique does not perform any sort of induction. When proving the inner @a@
--- expression, the technique merely allocates a fresh constant standing for
--- "@a@, one timestep in the past." Nothing is asserted about the fresh
--- constant.
---
--- An example of a property that is provable by this approach is:
---
--- @
--- a = True : b
--- b = not a
---
--- -- Property: a || b
--- @
---
--- By allocating a fresh constant, @b_-1@, standing for "the value of @b@ one
--- timestep in the past", the equation for @a || b@ at some arbitrary point in
--- the future reduces to @b_-1 || not b_-1@, which is always true.
---
--- In addition to proving that the stream expression is true at some arbitrary
--- point in the future, we also prove it for the first @k@ timesteps, where @k@
--- is the maximum buffer length of all streams in the given spec. This amounts
--- to simply interpreting the spec, although external variables are still
--- represented as constants with unknown values.
-
+-- TODO, we should reogranize this proof technique into the API of "Copilot.Theorem.Prove",
+-- which allows users more control over what properties are proved and how the proofs
+-- are constructed.
 module Copilot.Theorem.What4
   ( Solver(..)
   , SatResult(..)

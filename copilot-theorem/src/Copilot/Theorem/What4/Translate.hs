@@ -188,6 +188,17 @@ runTransM sym spec m =
      (res, _) <- runStateT (unTransM m) st
      return res
 
+-- | Retrieve a stream definition given its id.
+getStreamDef :: CE.Id -> TransM sym CS.Stream
+getStreamDef streamId = fromJust <$> gets (Map.lookup streamId . streams)
+
+fieldName :: KnownSymbol s => CT.Field s a -> SymbolRepr s
+fieldName _ = knownSymbol
+
+valueName :: CT.Value a -> Some SymbolRepr
+valueName (CT.Value _ f) = Some (fieldName f)
+
+
 -- | The What4 representation of a copilot expression. We do not attempt to
 -- track the type of the inner expression at the type level, but instead lump
 -- everything together into the 'XExpr t' type. The only reason this is a GADT
@@ -356,7 +367,10 @@ freshCPConstant sym nm tp = case tp of
     return $ XStruct elts
 
 
-getStreamValue :: WI.IsSymExprBuilder sym => sym -> CE.Id -> StreamOffset -> TransM sym (XExpr sym)
+-- | Compute and cache the value of a stream with the given identifier
+--   at the given offset.
+getStreamValue :: WI.IsSymExprBuilder sym =>
+  sym -> CE.Id -> StreamOffset -> TransM sym (XExpr sym)
 getStreamValue sym streamId offset =
   do svs <- gets streamValues
      case Map.lookup (streamId, offset) svs of
@@ -383,14 +397,44 @@ getStreamValue sym streamId offset =
                         in liftIO (freshCPConstant sym nm tp)
          | otherwise -> translateExpr sym mempty ex (RelativeOffset (i - len))
 
+
+-- | Compute and cache the value of an external stream with the given name
+--   at the given offset.
+getExternConstant :: WI.IsSymExprBuilder sym =>
+  sym -> CT.Type a -> CE.Name -> StreamOffset -> TransM sym (XExpr sym)
+getExternConstant sym tp nm offset =
+  do es <- gets externVars
+     case Map.lookup (nm, offset) es of
+       Just xe -> return xe
+       Nothing -> do
+         xe <- computeExternConstant
+         modify (\st -> st { externVars = Map.insert (nm, offset) xe (externVars st)
+                           , mentionedExternals = Map.insert nm (Some tp) (mentionedExternals st)
+                           } )
+         return xe
+ where
+ computeExternConstant =
+    case offset of
+      AbsoluteOffset i
+        | i < 0     -> panic ["Invalid absolute offset " ++ show i ++ " for external stream " ++ nm]
+        | otherwise -> let nm' = nm ++ "_a" ++ show i
+                       in liftIO (freshCPConstant sym nm' tp)
+      RelativeOffset i
+        | i < 0     -> panic ["Invalid relative offset " ++ show i ++ " for external stream " ++ nm]
+        | otherwise -> let nm' = nm ++ "_r" ++ show i
+                       in liftIO (freshCPConstant sym nm' tp)
+
+
 type LocalEnv sym = Map.Map CE.Name (StreamOffset -> TransM sym (XExpr sym))
 
+-- | Compute the value of a stream expression at the given offset in the
+--   given local environment.
 translateExpr ::
   WI.IsSymExprBuilder sym =>
   sym ->
-  LocalEnv sym ->
-  CE.Expr a ->
-  StreamOffset ->
+  LocalEnv sym {- ^ Enviornment for local variables -} ->
+  CE.Expr a {- ^ Expression to translate -} ->
+  StreamOffset {- ^ Offset to compute -} ->
   TransM sym (XExpr sym)
 translateExpr sym localEnv e offset = case e of
   CE.Const tp a -> liftIO $ translateConstExpr sym tp a
@@ -428,35 +472,6 @@ translateExpr sym localEnv e offset = case e of
       Nothing -> panic ["translateExpr: unknown var " ++ show nm]
       Just f  -> f offset
 
-getExternConstant :: WI.IsSymExprBuilder sym =>
-  sym -> CT.Type a -> CE.Name -> StreamOffset -> TransM sym (XExpr sym)
-getExternConstant sym tp nm offset =
-  do es <- gets externVars
-     case Map.lookup (nm, offset) es of
-       Just xe -> return xe
-       Nothing -> do
-         xe <- computeExternConstant
-         modify (\st -> st { externVars = Map.insert (nm, offset) xe (externVars st)
-                           , mentionedExternals = Map.insert nm (Some tp) (mentionedExternals st)
-                           } )
-         return xe
- where
- computeExternConstant =
-    case offset of
-      AbsoluteOffset i
-        | i < 0     -> panic ["Invalid absolute offset " ++ show i ++ " for external stream " ++ nm]
-        | otherwise -> let nm' = nm ++ "_a" ++ show i
-                       in liftIO (freshCPConstant sym nm' tp)
-      RelativeOffset i
-        | i < 0     -> panic ["Invalid relative offset " ++ show i ++ " for external stream " ++ nm]
-        | otherwise -> let nm' = nm ++ "_r" ++ show i
-                       in liftIO (freshCPConstant sym nm' tp)
-
-
--- | Retrieve a stream definition given its id.
-getStreamDef :: CE.Id -> TransM sym CS.Stream
-getStreamDef streamId = fromJust <$> gets (Map.lookup streamId . streams)
-
 
 type BVOp1 sym w = (KnownNat w, 1 <= w) => WI.SymBV sym w -> IO (WI.SymBV sym w)
 
@@ -466,15 +481,9 @@ type FPOp1 sym fpp =
 
 type RealOp1 sym = WI.SymExpr sym WT.BaseRealType -> IO (WI.SymExpr sym WT.BaseRealType)
 
-fieldName :: KnownSymbol s => CT.Field s a -> SymbolRepr s
-fieldName _ = knownSymbol
-
-valueName :: CT.Value a -> Some SymbolRepr
-valueName (CT.Value _ f) = Some (fieldName f)
-
 translateOp1 :: forall sym a b.
   WI.IsExprBuilder sym =>
-  CE.Expr b ->
+  CE.Expr b {- ^ Original value we are translating -} ->
   sym ->
   CE.Op1 a b ->
   XExpr sym ->
@@ -521,18 +530,22 @@ translateOp1 origExpr sym op xe = case (op, xe) of
   (CE.Sin _, xe) -> realOp (WI.realSin sym) xe
   (CE.Cos _, xe) -> realOp (WI.realCos sym) xe
   (CE.Tan _, xe) -> realOp (WI.realTan sym) xe
-  (CE.Asin _, xe) -> realOp (realRecip <=< WI.realSin sym) xe
-  (CE.Acos _, xe) -> realOp (realRecip <=< WI.realCos sym) xe
-  (CE.Atan _, xe) -> realOp (realRecip <=< WI.realTan sym) xe
   (CE.Sinh _, xe) -> realOp (WI.realSinh sym) xe
   (CE.Cosh _, xe) -> realOp (WI.realCosh sym) xe
   (CE.Tanh _, xe) -> realOp (WI.realTanh sym) xe
+
+  -- TODO, these inverse function definitions are bogus...
+  (CE.Asin _, xe) -> realOp (realRecip <=< WI.realSin sym) xe
+  (CE.Acos _, xe) -> realOp (realRecip <=< WI.realCos sym) xe
+  (CE.Atan _, xe) -> realOp (realRecip <=< WI.realTan sym) xe
   (CE.Asinh _, xe) -> realOp (realRecip <=< WI.realSinh sym) xe
   (CE.Acosh _, xe) -> realOp (realRecip <=< WI.realCosh sym) xe
   (CE.Atanh _, xe) -> realOp (realRecip <=< WI.realTanh sym) xe
+
   (CE.BwNot _, xe) -> case xe of
     XBool e -> XBool <$> WI.notPred sym e
     _ -> bvOp (WI.bvNotBits sym) xe
+
   (CE.Cast _ tp, _) -> castOp origExpr sym tp xe
   (CE.GetField (CT.Struct s) _ftp extractor, XStruct xes) -> do
     let fieldNameRepr = fieldName (extractor undefined)
@@ -613,7 +626,7 @@ type FPCmp2 sym fpp =
 
 translateOp2 :: forall sym a b c.
    WI.IsSymExprBuilder sym =>
-   CE.Expr c ->
+   CE.Expr c {- ^ Original value we are translating -} ->
    sym ->
    (WI.SymFn sym
        (EmptyCtx ::> WT.BaseRealType ::> WT.BaseRealType)
@@ -665,11 +678,14 @@ translateOp2 origExpr sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
   (CE.Ge _, xe1, xe2) -> numCmp (WI.bvSge sym) (WI.bvUge sym) (WI.floatGe sym) xe1 xe2
   (CE.Lt _, xe1, xe2) -> numCmp (WI.bvSlt sym) (WI.bvUlt sym) (WI.floatLt sym) xe1 xe2
   (CE.Gt _, xe1, xe2) -> numCmp (WI.bvSgt sym) (WI.bvUgt sym) (WI.floatGt sym) xe1 xe2
+
   (CE.BwAnd _, xe1, xe2) -> bvOp (WI.bvAndBits sym) (WI.bvAndBits sym) xe1 xe2
-  (CE.BwOr _, xe1, xe2) -> bvOp (WI.bvOrBits sym) (WI.bvOrBits sym) xe1 xe2
+  (CE.BwOr  _, xe1, xe2) -> bvOp (WI.bvOrBits sym)  (WI.bvOrBits sym)  xe1 xe2
   (CE.BwXor _, xe1, xe2) -> bvOp (WI.bvXorBits sym) (WI.bvXorBits sym) xe1 xe2
+
   -- Note: For both shift operators, we are interpreting the shifter as an
   -- unsigned bitvector regardless of whether it is a word or an int.
+  -- TODO, does this match the intended semantics?
   (CE.BwShiftL _ _, xe1, xe2) -> do
     Just (SomeBVExpr e1 w1 _ ctor1) <- return $ asBVExpr xe1
     Just (SomeBVExpr e2 w2 _ _    ) <- return $ asBVExpr xe2
@@ -698,7 +714,7 @@ translateOp2 origExpr sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
   -- true.
   (CE.Index _, xe1, xe2) -> do
     case (xe1, xe2) of
-      (XArray xes, XWord32 ix) -> buildIndexExpr sym 0 ix xes
+      (XArray xes, XWord32 ix) -> buildIndexExpr sym ix xes
       _ -> panic ["Unexpected values in index operation", show xe1, show xe2]
   _ -> panic [ "Unexpected values in binary op: "++ show (CP.ppExpr origExpr), show xe1, show xe2 ]
 
@@ -787,7 +803,7 @@ translateOp2 origExpr sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
 
 translateOp3 :: forall sym a b c d .
   WI.IsExprBuilder sym =>
-  CE.Expr d ->
+  CE.Expr d {- ^ Original value we are translating -} ->
   sym ->
   CE.Op3 a b c d ->
   XExpr sym ->
@@ -800,23 +816,27 @@ translateOp3 origExpr _sym _op xe1 xe2 xe3 =
         , show (CP.ppExpr origExpr), show xe1, show xe2, show xe3
         ]
 
-
-buildIndexExpr ::
+-- | Build a mux tree for array indexing.
+--   TODO, add special case for concrete index value.
+buildIndexExpr :: forall sym n.
   (1 <= n, WI.IsExprBuilder sym) =>
   sym ->
-  Word32 {- ^ Index -} ->
   WI.SymBV sym 32 {- ^ Index -} ->
   V.Vector n (XExpr sym) {- ^ Elements -} ->
   IO (XExpr sym)
-buildIndexExpr sym curIx ix xelts = case V.uncons xelts of
-  (xe, Left Refl) -> return xe
-  (xe, Right xelts') -> do
-    LeqProof <- return $ V.nonEmpty xelts'
-    rstExpr <- buildIndexExpr sym (curIx+1) ix xelts'
-    curIxExpr <- WI.bvLit sym knownNat (BV.word32 curIx)
-    ixEq <- WI.bvEq sym curIxExpr ix
-    mkIte sym ixEq xe rstExpr
-
+buildIndexExpr sym ix = loop 0
+  where
+    loop :: forall n'. (1 <= n') => Word32 -> V.Vector n' (XExpr sym) -> IO (XExpr sym)
+    loop curIx xelts = case V.uncons xelts of
+      -- Base case, exactly one element left
+      (xe, Left Refl) -> return xe
+      -- Recursive case
+      (xe, Right xelts') -> do
+        LeqProof <- return $ V.nonEmpty xelts'
+        rstExpr <- loop (curIx+1) ix xelts'
+        curIxExpr <- WI.bvLit sym knownNat (BV.word32 curIx)
+        ixEq <- WI.bvEq sym curIxExpr ix
+        mkIte sym ixEq xe rstExpr
 
 mkIte ::
   WI.IsExprBuilder sym =>
@@ -848,10 +868,10 @@ mkIte sym pred xe1 xe2 = case (xe1, xe2) of
 
 castOp ::
   WI.IsExprBuilder sym =>
-  CE.Expr a ->
+  CE.Expr a {- ^ Original value we are translating -} ->
   sym ->
-  CT.Type a ->
-  XExpr sym ->
+  CT.Type a {- ^ Type we are casting to -} ->
+  XExpr sym {- ^ Value to cast -} ->
   IO (XExpr sym)
 castOp origExpr sym tp xe = case (xe, tp) of
    -- "safe" casts that cannot lose information

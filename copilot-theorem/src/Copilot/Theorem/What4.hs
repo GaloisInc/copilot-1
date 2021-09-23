@@ -127,34 +127,46 @@ prove solver spec = do
     Yices -> WC.extendConfig WS.yicesOptions (WI.getConfiguration sym)
     Z3 -> WC.extendConfig WS.z3Options (WI.getConfiguration sym)
 
-  -- Define TransM action for proving properties. Doing this in TransM rather
-  -- than IO allows us to reuse the state for each property.
+  -- Compute the maximum amount of delay for any stream in this spec
+  let bufLen (CS.Stream _ buf _ _) = genericLength buf
+      maxBufLen = maximum (0 : (bufLen <$> CS.specStreams spec))
+
+  -- This process performs k-induction where we use @k = maxBufLen@.
+  -- The choice for @k@ is heuristic, but often effective.
+  -- TODO We should allow users to specify alternate k values, including 0 (no induction).
   let proveProperties = forM (CS.specProperties spec) $ \pr -> do
-        let bufLen (CS.Stream _ buf _ _) = genericLength buf
-            maxBufLen = maximum (0 : (bufLen <$> CS.specStreams spec))
-        prefix <- forM [0 .. maxBufLen - 1] $ \k -> do
-          translateExpr sym mempty (CS.propertyExpr pr) (AbsoluteOffset k) >>= \case
+
+        -- State the base cases for k induction.
+        base_cases <- forM [0 .. maxBufLen - 1] $ \i -> do
+          translateExpr sym mempty (CS.propertyExpr pr) (AbsoluteOffset i) >>= \case
             XBool p -> return p
             xe -> panic ["Property expected to have boolean result", show xe]
 
-        -- translate the induction hypothesis for all values up to maxBufLen in the past
-        ind_hyps <- forM [0 .. maxBufLen-1] $ \k -> do
-          translateExpr sym mempty (CS.propertyExpr pr) (RelativeOffset k) >>= \case
+        -- Translate the induction hypothesis for all values up to maxBufLen in the past
+        ind_hyps <- forM [0 .. maxBufLen-1] $ \i -> do
+          translateExpr sym mempty (CS.propertyExpr pr) (RelativeOffset i) >>= \case
             XBool hyp -> return hyp
             xe -> panic ["Property expected to have boolean result", show xe]
 
-        -- translate the predicate for the "current" value
-        p <- translateExpr sym mempty (CS.propertyExpr pr) (RelativeOffset maxBufLen) >>= \case
-               XBool p -> return p
-               xe -> panic ["Property expected to have boolean result", show xe]
+        -- Translate the predicate for the "current" value
+        ind_goal <-
+          translateExpr sym mempty (CS.propertyExpr pr) (RelativeOffset maxBufLen) >>= \case
+            XBool p -> return p
+            xe -> panic ["Property expected to have boolean result", show xe]
 
-        -- compute the predicate (ind_hyps ==> p)
-        p' <- liftIO $ foldrM (WI.impliesPred sym) p ind_hyps
+        -- Compute the predicate (ind_hyps ==> p)
+        ind_case <- liftIO $ foldrM (WI.impliesPred sym) ind_goal ind_hyps
 
-        p_and_prefix <- liftIO $ foldrM (WI.andPred sym) p' prefix
-        not_p_and_prefix <- liftIO $ WI.notPred sym p_and_prefix
+        -- Compute the conjunction of the base and inductive cases
+        p <- liftIO $ foldrM (WI.andPred sym) ind_case base_cases
 
-        let clauses = [not_p_and_prefix]
+        -- Negate the goals for for SAT search
+        not_p <- liftIO $ WI.notPred sym p
+        let clauses = [not_p]
+
+        -- TODO, we could determine if the property fails in one of the base cases
+        --  (a true model-checking failure) or in the inductive step and report
+        --  to the user.
         case solver of
           CVC4 -> liftIO $ WS.runCVC4InOverride sym WS.defaultLogData clauses $ \case
             WS.Sat (_ge, _) -> return (CS.propertyName pr, Invalid)

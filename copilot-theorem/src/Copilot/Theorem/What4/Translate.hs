@@ -833,7 +833,7 @@ buildIndexExpr sym ix = loop 0
       -- Recursive case
       (xe, Right xelts') -> do
         LeqProof <- return $ V.nonEmpty xelts'
-        rstExpr <- loop (curIx+1) ix xelts'
+        rstExpr <- loop (curIx+1) xelts'
         curIxExpr <- WI.bvLit sym knownNat (BV.word32 curIx)
         ixEq <- WI.bvEq sym curIxExpr ix
         mkIte sym ixEq xe rstExpr

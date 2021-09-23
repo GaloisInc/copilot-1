@@ -177,27 +177,28 @@ prove solver spec = do
   runTransM sym spec proveProperties
 
 
-data BisimulationProofState t =
+data BisimulationProofState sym =
   BisimulationProofState
-  { streamState :: [(CE.Id, Some CT.Type, [XExpr t])]
+  { streamState :: [(CE.Id, Some CT.Type, [XExpr sym])]
   }
 
-data BisimulationProofBundle t =
+data BisimulationProofBundle sym =
   BisimulationProofBundle
-  { initialStreamState :: BisimulationProofState t
-  , preStreamState     :: BisimulationProofState t
-  , postStreamState    :: BisimulationProofState t
-  , externalInputs     :: [(CE.Name, Some CT.Type, XExpr t)]
-  , triggerState       :: [(CE.Name, WB.BoolExpr t, [(Some CT.Type, XExpr t)])]
-  , assumptions        :: [WB.BoolExpr t]
+  { initialStreamState :: BisimulationProofState sym
+  , preStreamState     :: BisimulationProofState sym
+  , postStreamState    :: BisimulationProofState sym
+  , externalInputs     :: [(CE.Name, Some CT.Type, XExpr sym)]
+  , triggerState       :: [(CE.Name, WI.Pred sym, [(Some CT.Type, XExpr sym)])]
+  , assumptions        :: [WI.Pred sym]
   }
 
 
 computeBisimulationProofBundle ::
-  WB.ExprBuilder t st fs ->
+  WI.IsSymExprBuilder sym =>
+  sym ->
   [String] ->
   CS.Spec ->
-  IO (BisimulationProofBundle t)
+  IO (BisimulationProofBundle sym)
 computeBisimulationProofBundle sym properties spec =
   do iss <- computeInitialStreamState sym spec
      runTransM sym spec $
@@ -218,9 +219,10 @@ computeBisimulationProofBundle sym properties spec =
 
 
 computeInitialStreamState ::
-  WB.ExprBuilder t st fs ->
+  WI.IsSymExprBuilder sym =>
+  sym ->
   CS.Spec ->
-  IO (BisimulationProofState t)
+  IO (BisimulationProofState sym)
 computeInitialStreamState sym spec =
   do xs <- forM (CS.specStreams spec) $
             \CS.Stream{ CS.streamId = nm, CS.streamExprType = tp, CS.streamBuffer = buf }  ->
@@ -229,9 +231,10 @@ computeInitialStreamState sym spec =
      return (BisimulationProofState xs)
 
 computePrestate ::
-  WB.ExprBuilder t st fs ->
+  WI.IsSymExprBuilder sym =>
+  sym ->
   CS.Spec ->
-  TransM t (BisimulationProofState t)
+  TransM sym (BisimulationProofState sym)
 computePrestate sym spec =
   do xs <- forM (CS.specStreams spec) $
              \CS.Stream{ CS.streamId = nm, CS.streamExprType = tp, CS.streamBuffer = buf } ->
@@ -242,9 +245,10 @@ computePrestate sym spec =
      return (BisimulationProofState xs)
 
 computePoststate ::
-  WB.ExprBuilder t st fs ->
+  WI.IsSymExprBuilder sym =>
+  sym ->
   CS.Spec ->
-  TransM t (BisimulationProofState t)
+  TransM sym (BisimulationProofState sym)
 computePoststate sym spec =
   do xs <- forM (CS.specStreams spec) $
              \CS.Stream{ CS.streamId = nm, CS.streamExprType = tp, CS.streamBuffer = buf } ->
@@ -255,9 +259,10 @@ computePoststate sym spec =
      return (BisimulationProofState xs)
 
 computeTriggerState ::
-  WB.ExprBuilder t st fs ->
+  WI.IsSymExprBuilder sym =>
+  sym ->
   CS.Spec ->
-  TransM t [(CE.Name, WB.BoolExpr t, [(Some CT.Type, XExpr t)])]
+  TransM sym [(CE.Name, WI.Pred sym, [(Some CT.Type, XExpr sym)])]
 computeTriggerState sym spec = forM (CS.specTriggers spec) $
     \CS.Trigger{ CS.triggerName = nm, CS.triggerGuard = guard, CS.triggerArgs = args } ->
       do guard' <- translateExpr sym mempty guard (RelativeOffset 0) >>= \case
@@ -271,8 +276,9 @@ computeTriggerState sym spec = forM (CS.specTriggers spec) $
         return (Some tp, v)
 
 computeExternalInputs ::
-  WB.ExprBuilder t st fs ->
-  TransM t [(CE.Name, Some CT.Type, XExpr t)]
+  WI.IsSymExprBuilder sym =>
+  sym ->
+  TransM sym [(CE.Name, Some CT.Type, XExpr sym)]
 computeExternalInputs sym =
   do exts <- Map.toList <$> gets mentionedExternals
      forM exts $ \(nm, Some tp) ->
@@ -280,10 +286,11 @@ computeExternalInputs sym =
           return (nm, Some tp, v)
 
 computeAssumptions ::
-  WB.ExprBuilder t st fs ->
+  WI.IsSymExprBuilder sym =>
+  sym ->
   [String] ->
   CS.Spec ->
-  TransM t [WB.BoolExpr t]
+  TransM sym [WI.Pred sym]
 computeAssumptions sym properties spec =
   concat <$>
   forM [ CS.propertyExpr p | p <- CS.specProperties spec, elem (CS.propertyName p) properties ] (\e ->

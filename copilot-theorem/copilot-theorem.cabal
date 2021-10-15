@@ -44,6 +44,7 @@ library
                           , bimap         >= 0.3 && < 0.4
                           , bv-sized      >= 1.0.2 && < 1.1
                           , containers    >= 0.4 && < 0.7
+                          , data-binary-ieee754
                           , data-default  >= 0.7 && < 0.8
                           , directory     >= 1.3 && < 1.4
                           , libBF         >= 0.6.2 && < 0.7

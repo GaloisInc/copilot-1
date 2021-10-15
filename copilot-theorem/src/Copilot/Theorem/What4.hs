@@ -52,11 +52,12 @@ import qualified Copilot.Core.Expr as CE
 import qualified Copilot.Core.Spec as CS
 import qualified Copilot.Core.Type as CT
 
-import qualified What4.Config           as WC
-import qualified What4.Expr.Builder     as WB
-import qualified What4.Interface        as WI
-import qualified What4.Solver           as WS
-import qualified What4.Solver.DReal     as WS
+import qualified What4.Config                   as WC
+import qualified What4.Expr.Builder             as WB
+import qualified What4.Interface                as WI
+import qualified What4.InterpretedFloatingPoint as WFP
+import qualified What4.Solver                   as WS
+import qualified What4.Solver.DReal             as WS
 
 import Control.Monad.State
 import Data.Foldable (foldrM)
@@ -183,7 +184,7 @@ data BisimulationProofBundle sym =
 
 
 computeBisimulationProofBundle ::
-  WI.IsSymExprBuilder sym =>
+  WFP.IsInterpretedFloatSymExprBuilder sym =>
   sym ->
   [String] ->
   CS.Spec ->
@@ -208,7 +209,7 @@ computeBisimulationProofBundle sym properties spec =
 
 
 computeInitialStreamState ::
-  WI.IsSymExprBuilder sym =>
+  WFP.IsInterpretedFloatSymExprBuilder sym =>
   sym ->
   CS.Spec ->
   IO (BisimulationProofState sym)
@@ -220,7 +221,7 @@ computeInitialStreamState sym spec =
      return (BisimulationProofState xs)
 
 computePrestate ::
-  WI.IsSymExprBuilder sym =>
+  WFP.IsInterpretedFloatSymExprBuilder sym =>
   sym ->
   CS.Spec ->
   TransM sym (BisimulationProofState sym)
@@ -234,7 +235,7 @@ computePrestate sym spec =
      return (BisimulationProofState xs)
 
 computePoststate ::
-  WI.IsSymExprBuilder sym =>
+  WFP.IsInterpretedFloatSymExprBuilder sym =>
   sym ->
   CS.Spec ->
   TransM sym (BisimulationProofState sym)
@@ -248,7 +249,7 @@ computePoststate sym spec =
      return (BisimulationProofState xs)
 
 computeTriggerState ::
-  WI.IsSymExprBuilder sym =>
+  WFP.IsInterpretedFloatSymExprBuilder sym =>
   sym ->
   CS.Spec ->
   TransM sym [(CE.Name, WI.Pred sym, [(Some CT.Type, XExpr sym)])]
@@ -265,7 +266,7 @@ computeTriggerState sym spec = forM (CS.specTriggers spec) $
         return (Some tp, v)
 
 computeExternalInputs ::
-  WI.IsSymExprBuilder sym =>
+  WFP.IsInterpretedFloatSymExprBuilder sym =>
   sym ->
   TransM sym [(CE.Name, Some CT.Type, XExpr sym)]
 computeExternalInputs sym =
@@ -275,7 +276,7 @@ computeExternalInputs sym =
           return (nm, Some tp, v)
 
 computeAssumptions ::
-  WI.IsSymExprBuilder sym =>
+  WFP.IsInterpretedFloatSymExprBuilder sym =>
   sym ->
   [String] ->
   CS.Spec ->

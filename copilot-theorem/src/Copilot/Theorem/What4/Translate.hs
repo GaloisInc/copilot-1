@@ -51,12 +51,14 @@ import qualified Copilot.Core.Spec       as CS
 import qualified Copilot.Core.Type       as CT
 import qualified Copilot.Core.Type.Array as CT
 
-import qualified What4.Expr.Builder     as WB
-import qualified What4.Expr.GroundEval  as WG
-import qualified What4.Interface        as WI
-import qualified What4.BaseTypes        as WT
+import qualified What4.Expr.Builder             as WB
+import qualified What4.Expr.GroundEval          as WG
+import qualified What4.Interface                as WI
+import qualified What4.InterpretedFloatingPoint as WFP
+import qualified What4.BaseTypes                as WT
 
 import Control.Monad.State
+import qualified Data.Binary.IEEE754 as IEEE754
 import qualified Data.BitVector.Sized as BV
 import Data.IORef (newIORef, readIORef, modifyIORef)
 import Data.List (elemIndex, genericLength, genericIndex)
@@ -69,9 +71,8 @@ import Data.Parameterized.Some
 import Data.Parameterized.SymbolRepr
 import qualified Data.Parameterized.Vector as V
 import Data.Word
-import LibBF ( bfToDouble
-             , bfFromDouble
-             , bfPosZero
+import LibBF ( BigFloat
+             , bfToDouble
              , pattern NearEven )
 import GHC.TypeNats (KnownNat)
 import qualified Panic as Panic
@@ -214,8 +215,8 @@ data XExpr sym where
   XWord16     :: WI.SymExpr sym (WT.BaseBVType 16) -> XExpr sym
   XWord32     :: WI.SymExpr sym (WT.BaseBVType 32) -> XExpr sym
   XWord64     :: WI.SymExpr sym (WT.BaseBVType 64) -> XExpr sym
-  XFloat      :: WI.SymExpr sym (WT.BaseFloatType WT.Prec32) -> XExpr sym
-  XDouble     :: WI.SymExpr sym (WT.BaseFloatType WT.Prec64) -> XExpr sym
+  XFloat      :: WI.SymExpr sym (WFP.SymInterpretedFloatType sym WFP.SingleFloat) -> XExpr sym
+  XDouble     :: WI.SymExpr sym (WFP.SymInterpretedFloatType sym WFP.DoubleFloat) -> XExpr sym
   XEmptyArray :: XExpr sym
   XArray      :: 1 <= n => V.Vector n (XExpr sym) -> XExpr sym
   XStruct     :: [XExpr sym] -> XExpr sym
@@ -240,7 +241,9 @@ data CopilotValue a = CopilotValue { cvType :: CT.Type a
                                    , cvVal :: a
                                    }
 
-valFromExpr :: sym ~ WB.ExprBuilder t st fs =>
+valFromExpr ::
+  forall sym t st fm.
+  (sym ~ WB.ExprBuilder t st (WB.Flags fm), KnownRepr WB.FloatModeRepr fm) =>
   WG.GroundEvalFn t -> XExpr sym -> IO (Some CopilotValue)
 valFromExpr ge xe = case xe of
   XBool e -> Some . CopilotValue CT.Bool <$> WG.groundEval ge e
@@ -253,15 +256,37 @@ valFromExpr ge xe = case xe of
   XWord32 e -> Some . CopilotValue CT.Word32 . fromBV <$> WG.groundEval ge e
   XWord64 e -> Some . CopilotValue CT.Word64 . fromBV <$> WG.groundEval ge e
   XFloat e ->
-    Some . CopilotValue CT.Float . realToFrac . fst . bfToDouble NearEven <$> WG.groundEval ge e
+    Some . CopilotValue CT.Float <$>
+      iFloatGroundEval WFP.SingleFloatRepr e
+                       (realToFrac . fst . bfToDouble NearEven)
+                       fromRational
+                       (IEEE754.wordToFloat . fromInteger . BV.asUnsigned)
   XDouble e ->
-    Some . CopilotValue CT.Double . fst . bfToDouble NearEven <$> WG.groundEval ge e
+    Some . CopilotValue CT.Double <$>
+      iFloatGroundEval WFP.DoubleFloatRepr e
+                       (fst . bfToDouble NearEven)
+                       fromRational
+                       (IEEE754.wordToDouble . fromInteger . BV.asUnsigned)
   _ -> error "valFromExpr unhandled case"
   where fromBV :: forall a w . Num a => BV.BV w -> a
         fromBV = fromInteger . BV.asUnsigned
 
         fromSBV :: forall a w . (1 <= w, KnownNat w, Num a) => BV.BV w -> a
         fromSBV = fromInteger . BV.asSigned knownRepr
+
+        iFloatGroundEval ::
+          forall fi r.
+          WFP.FloatInfoRepr fi ->
+          WI.SymExpr sym (WFP.SymInterpretedFloatType sym fi) ->
+          (BigFloat -> r) ->
+          (Rational -> r) ->
+          (forall w. BV.BV w -> r) ->
+          IO r
+        iFloatGroundEval _ e ieeeK realK uninterpK =
+          case (knownRepr :: WB.FloatModeRepr fm) of
+            WB.FloatIEEERepr          -> ieeeK <$> WG.groundEval ge e
+            WB.FloatRealRepr          -> realK <$> WG.groundEval ge e
+            WB.FloatUninterpretedRepr -> uninterpK <$> WG.groundEval ge e
 
 -- | A view of an XExpr as a bitvector expression, a natrepr for its width, its
 -- signed/unsigned status, and the constructor used to reconstruct an XExpr from
@@ -297,7 +322,7 @@ asBVExpr xe = case xe of
 -- | Translate a constant expression by creating a what4 literal and packaging
 -- it up into an 'XExpr'.
 translateConstExpr :: forall sym a.
-  WI.IsExprBuilder sym =>
+  WFP.IsInterpretedFloatExprBuilder sym =>
   sym ->
   CT.Type a ->
   a ->
@@ -314,8 +339,8 @@ translateConstExpr sym tp a = case tp of
   CT.Word16 -> XWord16 <$> WI.bvLit sym knownNat (BV.word16 a)
   CT.Word32 -> XWord32 <$> WI.bvLit sym knownNat (BV.word32 a)
   CT.Word64 -> XWord64 <$> WI.bvLit sym knownNat (BV.word64 a)
-  CT.Float -> XFloat <$> WI.floatLit sym knownRepr (bfFromDouble (realToFrac a))
-  CT.Double -> XDouble <$> WI.floatLit sym knownRepr (bfFromDouble a)
+  CT.Float -> XFloat <$> WFP.iFloatLitSingle sym a
+  CT.Double -> XDouble <$> WFP.iFloatLitDouble sym a
   CT.Array tp -> do
     elts <- traverse (translateConstExpr sym tp) (CT.arrayelems a)
     Just (Some n) <- return $ someNat (length elts)
@@ -337,7 +362,7 @@ arrayLen _ = knownNat
 -- stream variable, but that variable has not been accessed yet and therefore
 -- has no constant allocated.
 freshCPConstant :: forall a sym.
-  WI.IsSymExprBuilder sym =>
+  WFP.IsInterpretedFloatSymExprBuilder sym =>
   sym ->
   String ->
   CT.Type a ->
@@ -352,8 +377,8 @@ freshCPConstant sym nm tp = case tp of
   CT.Word16 -> XWord16 <$> WI.freshConstant sym (WI.safeSymbol nm) knownRepr
   CT.Word32 -> XWord32 <$> WI.freshConstant sym (WI.safeSymbol nm) knownRepr
   CT.Word64 -> XWord64 <$> WI.freshConstant sym (WI.safeSymbol nm) knownRepr
-  CT.Float -> XFloat <$> WI.freshConstant sym (WI.safeSymbol nm) knownRepr
-  CT.Double -> XDouble <$> WI.freshConstant sym (WI.safeSymbol nm) knownRepr
+  CT.Float -> XFloat <$> WFP.freshFloatConstant sym (WI.safeSymbol nm) WFP.SingleFloatRepr
+  CT.Double -> XDouble <$> WFP.freshFloatConstant sym (WI.safeSymbol nm) WFP.DoubleFloatRepr
   atp@(CT.Array itp) -> do
     n <- return $ arrayLen atp
     case isZeroOrGT1 n of
@@ -369,7 +394,7 @@ freshCPConstant sym nm tp = case tp of
 
 -- | Compute and cache the value of a stream with the given identifier
 --   at the given offset.
-getStreamValue :: WI.IsSymExprBuilder sym =>
+getStreamValue :: WFP.IsInterpretedFloatSymExprBuilder sym =>
   sym -> CE.Id -> StreamOffset -> TransM sym (XExpr sym)
 getStreamValue sym streamId offset =
   do svs <- gets streamValues
@@ -400,7 +425,7 @@ getStreamValue sym streamId offset =
 
 -- | Compute and cache the value of an external stream with the given name
 --   at the given offset.
-getExternConstant :: WI.IsSymExprBuilder sym =>
+getExternConstant :: WFP.IsInterpretedFloatSymExprBuilder sym =>
   sym -> CT.Type a -> CE.Name -> StreamOffset -> TransM sym (XExpr sym)
 getExternConstant sym tp nm offset =
   do es <- gets externVars
@@ -430,7 +455,7 @@ type LocalEnv sym = Map.Map CE.Name (StreamOffset -> TransM sym (XExpr sym))
 -- | Compute the value of a stream expression at the given offset in the
 --   given local environment.
 translateExpr ::
-  WI.IsSymExprBuilder sym =>
+  WFP.IsInterpretedFloatSymExprBuilder sym =>
   sym ->
   LocalEnv sym {- ^ Enviornment for local variables -} ->
   CE.Expr a {- ^ Expression to translate -} ->
@@ -475,14 +500,15 @@ translateExpr sym localEnv e offset = case e of
 
 type BVOp1 sym w = (KnownNat w, 1 <= w) => WI.SymBV sym w -> IO (WI.SymBV sym w)
 
-type FPOp1 sym fpp =
-  KnownRepr WT.FloatPrecisionRepr fpp =>
-  WI.SymExpr sym (WT.BaseFloatType fpp) -> IO (WI.SymExpr sym (WT.BaseFloatType fpp))
+type FPOp1 sym fi =
+  WFP.FloatInfoRepr fi ->
+  WI.SymExpr sym (WFP.SymInterpretedFloatType sym fi) ->
+  IO (WI.SymExpr sym (WFP.SymInterpretedFloatType sym fi))
 
 type RealOp1 sym = WI.SymExpr sym WT.BaseRealType -> IO (WI.SymExpr sym WT.BaseRealType)
 
 translateOp1 :: forall sym a b.
-  WI.IsExprBuilder sym =>
+  WFP.IsInterpretedFloatExprBuilder sym =>
   CE.Expr b {- ^ Original value we are translating -} ->
   sym ->
   CE.Op1 a b ->
@@ -497,11 +523,11 @@ translateOp1 origExpr sym op xe = case (op, xe) of
                        e_neg <- WI.bvSlt sym e zero
                        neg_e <- WI.bvSub sym zero e
                        WI.bvIte sym e_neg neg_e e
-          fpAbs :: FPOp1 sym fpp
-          fpAbs e = do zero <- WI.floatLit sym knownRepr bfPosZero
-                       e_neg <- WI.floatLt sym e zero
-                       neg_e <- WI.floatSub sym fpRM zero e
-                       WI.floatIte sym e_neg neg_e e
+          fpAbs :: forall fi . FPOp1 sym fi
+          fpAbs fiRepr e = do zero <- WFP.iFloatPZero sym fiRepr
+                              e_neg <- WFP.iFloatLt @_ @fi sym e zero
+                              neg_e <- WFP.iFloatSub @_ @fi sym fpRM zero e
+                              WFP.iFloatIte @_ @fi sym e_neg neg_e e
   (CE.Sign _, xe) -> numOp bvSign fpSign xe
     where bvSign :: BVOp1 sym w
           bvSign e = do zero <- WI.bvLit sym knownRepr (BV.zero knownNat)
@@ -511,19 +537,19 @@ translateOp1 origExpr sym op xe = case (op, xe) of
                         e_neg <- WI.bvSlt sym e zero
                         t <- WI.bvIte sym e_neg neg_one pos_one
                         WI.bvIte sym e_zero zero t
-          fpSign :: FPOp1 sym fpp
-          fpSign e = do zero <- WI.floatLit sym knownRepr bfPosZero
-                        neg_one <- WI.floatLit sym knownRepr (bfFromDouble (-1.0))
-                        pos_one <- WI.floatLit sym knownRepr (bfFromDouble 1.0)
-                        e_zero <- WI.floatEq sym e zero
-                        e_neg <- WI.floatLt sym e zero
-                        t <- WI.floatIte sym e_neg neg_one pos_one
-                        WI.floatIte sym e_zero zero t
+          fpSign :: forall fi . FPOp1 sym fi
+          fpSign fiRepr  e = do zero <- WFP.iFloatPZero sym fiRepr
+                                neg_one <- fpLit fiRepr (-1.0)
+                                pos_one <- fpLit fiRepr   1.0
+                                e_zero <- WFP.iFloatEq @_ @fi sym e zero
+                                e_neg <- WFP.iFloatLt @_ @fi sym e zero
+                                t <- WFP.iFloatIte @_ @fi sym e_neg neg_one pos_one
+                                WFP.iFloatIte @_ @fi sym e_zero zero t
   (CE.Recip _, xe) -> fpOp recip xe
-    where recip :: FPOp1 sym fpp
-          recip e = do one <- WI.floatLit sym knownRepr (bfFromDouble 1.0)
-                       WI.floatDiv sym fpRM one e
-  (CE.Sqrt _, xe) -> fpOp (WI.floatSqrt sym fpRM) xe
+    where recip :: forall fi . FPOp1 sym fi
+          recip fiRepr e = do one <- fpLit fiRepr 1.0
+                              WFP.iFloatDiv @_ @fi sym fpRM one e
+  (CE.Sqrt _, xe) -> fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatSqrt @_ @fi sym fpRM) xe
 
   (CE.Exp _, xe) -> realOp (WI.realExp sym) xe
   (CE.Log _, xe) -> realOp (WI.realLog sym) xe
@@ -557,7 +583,7 @@ translateOp1 origExpr sym op xe = case (op, xe) of
   _ -> panic ["Unexpected value for op: " ++ show (CP.ppExpr origExpr), show xe ]
 
   where numOp :: (forall w . BVOp1 sym w)
-              -> (forall fpp . FPOp1 sym fpp)
+              -> (forall fi . FPOp1 sym fi)
               -> XExpr sym
               -> IO (XExpr sym)
         numOp bvOp fpOp xe = case xe of
@@ -569,8 +595,8 @@ translateOp1 origExpr sym op xe = case (op, xe) of
           XWord16 e -> XWord16 <$> bvOp e
           XWord32 e -> XWord32 <$> bvOp e
           XWord64 e -> XWord64 <$> bvOp e
-          XFloat e -> XFloat <$> fpOp e
-          XDouble e -> XDouble <$> fpOp e
+          XFloat e -> XFloat <$> fpOp WFP.SingleFloatRepr e
+          XDouble e -> XDouble <$> fpOp WFP.DoubleFloatRepr e
           _ -> panic [ "Unexpected value in numOp", show xe ]
 
         bvOp :: (forall w . BVOp1 sym w) -> XExpr sym -> IO (XExpr sym)
@@ -585,31 +611,41 @@ translateOp1 origExpr sym op xe = case (op, xe) of
           XWord64 e -> XWord64 <$> f e
           _ -> panic [ "Unexpected value in bvOp", show xe ]
 
-        fpOp :: (forall fpp . FPOp1 sym fpp) -> XExpr sym -> IO (XExpr sym)
+        fpOp :: (forall fi . FPOp1 sym fi) -> XExpr sym -> IO (XExpr sym)
         fpOp g xe = case xe of
-          XFloat e -> XFloat <$> g e
-          XDouble e -> XDouble <$> g e
+          XFloat e -> XFloat <$> g WFP.SingleFloatRepr e
+          XDouble e -> XDouble <$> g WFP.DoubleFloatRepr e
           _ -> panic [ "Unexpected value in fpOp", show xe ]
 
         realOp :: RealOp1 sym -> XExpr sym -> IO (XExpr sym)
         realOp h xe = fpOp hf xe
-          where hf :: (forall fpp . FPOp1 sym fpp)
-                hf e = do re <- WI.floatToReal sym e
-                          hre <- h re
-                          WI.realToFloat sym knownRepr fpRM hre
+          where hf :: forall fi . FPOp1 sym fi
+                hf fiRepr e = do re <- WFP.iFloatToReal @_ @fi sym e
+                                 hre <- h re
+                                 WFP.iRealToFloat sym fiRepr fpRM hre
 
         realRecip :: RealOp1 sym
         realRecip e = do one <- WI.realLit sym 1
                          WI.realDiv sym one e
 
+        fpLit :: forall fi.
+                 WFP.FloatInfoRepr fi ->
+                 (forall frac. Fractional frac => frac) ->
+                 IO (WI.SymExpr sym (WFP.SymInterpretedFloatType sym fi))
+        fpLit fiRepr fracLit =
+          case fiRepr of
+            WFP.SingleFloatRepr -> WFP.iFloatLitSingle sym fracLit
+            WFP.DoubleFloatRepr -> WFP.iFloatLitDouble sym fracLit
+            _ -> panic ["Expected single- or double-precision float", show fiRepr]
+
 type BVOp2 sym w = (KnownNat w, 1 <= w) =>
   WI.SymBV sym w -> WI.SymBV sym w -> IO (WI.SymBV sym w)
 
-type FPOp2 sym fpp =
-  KnownRepr WT.FloatPrecisionRepr fpp =>
-  WI.SymExpr sym (WT.BaseFloatType fpp) ->
-  WI.SymExpr sym (WT.BaseFloatType fpp) ->
-  IO (WI.SymExpr sym (WT.BaseFloatType fpp))
+type FPOp2 sym fi =
+  WFP.FloatInfoRepr fi ->
+  WI.SymExpr sym (WFP.SymInterpretedFloatType sym fi) ->
+  WI.SymExpr sym (WFP.SymInterpretedFloatType sym fi) ->
+  IO (WI.SymExpr sym (WFP.SymInterpretedFloatType sym fi))
 
 type RealOp2 sym =
   WI.SymExpr sym WT.BaseRealType -> WI.SymExpr sym WT.BaseRealType -> IO (WI.SymExpr sym WT.BaseRealType)
@@ -618,14 +654,14 @@ type BoolCmp2 sym = WI.Pred sym -> WI.Pred sym -> IO (WI.Pred sym)
 
 type BVCmp2 sym w = (KnownNat w, 1 <= w) => WI.SymBV sym w -> WI.SymBV sym w -> IO (WI.Pred sym)
 
-type FPCmp2 sym fpp =
-  KnownRepr WT.FloatPrecisionRepr fpp =>
-  WI.SymExpr sym (WT.BaseFloatType fpp) ->
-  WI.SymExpr sym (WT.BaseFloatType fpp) ->
+type FPCmp2 sym fi =
+  WFP.FloatInfoRepr fi ->
+  WI.SymExpr sym (WFP.SymInterpretedFloatType sym fi) ->
+  WI.SymExpr sym (WFP.SymInterpretedFloatType sym fi) ->
   IO (WI.Pred sym)
 
 translateOp2 :: forall sym a b c.
-   WI.IsSymExprBuilder sym =>
+   WFP.IsInterpretedFloatSymExprBuilder sym =>
    CE.Expr c {- ^ Original value we are translating -} ->
    sym ->
    (WI.SymFn sym
@@ -643,27 +679,36 @@ translateOp2 :: forall sym a b c.
 translateOp2 origExpr sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
   (CE.And, XBool e1, XBool e2) -> XBool <$> WI.andPred sym e1 e2
   (CE.Or, XBool e1, XBool e2) -> XBool <$> WI.orPred sym e1 e2
-  (CE.Add _, xe1, xe2) -> numOp (WI.bvAdd sym) (WI.floatAdd sym fpRM) xe1 xe2
-  (CE.Sub _, xe1, xe2) -> numOp (WI.bvSub sym) (WI.floatSub sym fpRM) xe1 xe2
-  (CE.Mul _, xe1, xe2) -> numOp (WI.bvMul sym) (WI.floatMul sym fpRM) xe1 xe2
+  (CE.Add _, xe1, xe2) -> numOp (WI.bvAdd sym)
+                                (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatAdd @_ @fi sym fpRM)
+                                xe1 xe2
+  (CE.Sub _, xe1, xe2) -> numOp (WI.bvSub sym)
+                                (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatSub @_ @fi sym fpRM)
+                                xe1 xe2
+  (CE.Mul _, xe1, xe2) -> numOp (WI.bvMul sym)
+                                (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatMul @_ @fi sym fpRM)
+                                xe1 xe2
   (CE.Mod _, xe1, xe2) -> bvOp (WI.bvSrem sym) (WI.bvUrem sym) xe1 xe2
   (CE.Div _, xe1, xe2) -> bvOp (WI.bvSdiv sym) (WI.bvUdiv sym) xe1 xe2
-  (CE.Fdiv _, xe1, xe2) -> fpOp (WI.floatDiv sym fpRM) xe1 xe2
+  (CE.Fdiv _, xe1, xe2) -> fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatDiv @_ @fi sym fpRM)
+                                xe1 xe2
   (CE.Pow _, xe1, xe2) -> fpOp powFn' xe1 xe2
-    where powFn' :: FPOp2 sym fpp
-          powFn' e1 e2 = do re1 <- WI.floatToReal sym e1
-                            re2 <- WI.floatToReal sym e2
-                            let args = (Empty :> re1 :> re2)
-                            rpow <- WI.applySymFn sym powFn args
-                            WI.realToFloat sym knownRepr fpRM rpow
+    where powFn' :: forall fi . FPOp2 sym fi
+          powFn' fiRepr e1 e2 = do re1 <- WFP.iFloatToReal @_ @fi sym e1
+                                   re2 <- WFP.iFloatToReal @_ @fi sym e2
+                                   let args = (Empty :> re1 :> re2)
+                                   rpow <- WI.applySymFn sym powFn args
+                                   WFP.iRealToFloat sym fiRepr fpRM rpow
   (CE.Logb _, xe1, xe2) -> fpOp logbFn' xe1 xe2
-    where logbFn' :: FPOp2 sym fpp
-          logbFn' e1 e2 = do re1 <- WI.floatToReal sym e1
-                             re2 <- WI.floatToReal sym e2
-                             let args = (Empty :> re1 :> re2)
-                             rpow <- WI.applySymFn sym logbFn args
-                             WI.realToFloat sym knownRepr fpRM rpow
-  (CE.Eq _, xe1, xe2) -> cmp (WI.eqPred sym) (WI.bvEq sym) (WI.floatEq sym) xe1 xe2
+    where logbFn' :: forall fi . FPOp2 sym fi
+          logbFn' fiRepr e1 e2 = do re1 <- WFP.iFloatToReal @_ @fi sym e1
+                                    re2 <- WFP.iFloatToReal @_ @fi sym e2
+                                    let args = (Empty :> re1 :> re2)
+                                    rpow <- WI.applySymFn sym logbFn args
+                                    WFP.iRealToFloat sym fiRepr fpRM rpow
+  (CE.Eq _, xe1, xe2) -> cmp (WI.eqPred sym) (WI.bvEq sym)
+                             (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatEq @_ @fi sym)
+                             xe1 xe2
   (CE.Ne _, xe1, xe2) -> cmp neqPred bvNeq fpNeq xe1 xe2
     where neqPred :: BoolCmp2 sym
           neqPred e1 e2 = do e <- WI.eqPred sym e1 e2
@@ -671,13 +716,21 @@ translateOp2 origExpr sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
           bvNeq :: forall w . BVCmp2 sym w
           bvNeq e1 e2 = do e <- WI.bvEq sym e1 e2
                            WI.notPred sym e
-          fpNeq :: forall fpp . FPCmp2 sym fpp
-          fpNeq e1 e2 = do e <- WI.floatEq sym e1 e2
-                           WI.notPred sym e
-  (CE.Le _, xe1, xe2) -> numCmp (WI.bvSle sym) (WI.bvUle sym) (WI.floatLe sym) xe1 xe2
-  (CE.Ge _, xe1, xe2) -> numCmp (WI.bvSge sym) (WI.bvUge sym) (WI.floatGe sym) xe1 xe2
-  (CE.Lt _, xe1, xe2) -> numCmp (WI.bvSlt sym) (WI.bvUlt sym) (WI.floatLt sym) xe1 xe2
-  (CE.Gt _, xe1, xe2) -> numCmp (WI.bvSgt sym) (WI.bvUgt sym) (WI.floatGt sym) xe1 xe2
+          fpNeq :: forall fi . FPCmp2 sym fi
+          fpNeq _ e1 e2 = do e <- WFP.iFloatEq @_ @fi sym e1 e2
+                             WI.notPred sym e
+  (CE.Le _, xe1, xe2) -> numCmp (WI.bvSle sym) (WI.bvUle sym)
+                                (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatLe @_ @fi sym)
+                                xe1 xe2
+  (CE.Ge _, xe1, xe2) -> numCmp (WI.bvSge sym) (WI.bvUge sym)
+                                (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatGe @_ @fi sym)
+                                xe1 xe2
+  (CE.Lt _, xe1, xe2) -> numCmp (WI.bvSlt sym) (WI.bvUlt sym)
+                                (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatLt @_ @fi sym)
+                                xe1 xe2
+  (CE.Gt _, xe1, xe2) -> numCmp (WI.bvSgt sym) (WI.bvUgt sym)
+                                (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatGt @_ @fi sym)
+                                xe1 xe2
 
   (CE.BwAnd _, xe1, xe2) -> bvOp (WI.bvAndBits sym) (WI.bvAndBits sym) xe1 xe2
   (CE.BwOr  _, xe1, xe2) -> bvOp (WI.bvOrBits sym)  (WI.bvOrBits sym)  xe1 xe2
@@ -719,7 +772,7 @@ translateOp2 origExpr sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
   _ -> panic [ "Unexpected values in binary op: "++ show (CP.ppExpr origExpr), show xe1, show xe2 ]
 
   where numOp :: (forall w . BVOp2 sym w)
-              -> (forall fpp . FPOp2 sym fpp)
+              -> (forall fi . FPOp2 sym fi)
               -> XExpr sym
               -> XExpr sym
               -> IO (XExpr sym)
@@ -732,8 +785,8 @@ translateOp2 origExpr sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
           (XWord16 e1, XWord16 e2)-> XWord16 <$> bvOp e1 e2
           (XWord32 e1, XWord32 e2)-> XWord32 <$> bvOp e1 e2
           (XWord64 e1, XWord64 e2)-> XWord64 <$> bvOp e1 e2
-          (XFloat e1, XFloat e2)-> XFloat <$> fpOp e1 e2
-          (XDouble e1, XDouble e2)-> XDouble <$> fpOp e1 e2
+          (XFloat e1, XFloat e2)-> XFloat <$> fpOp WFP.SingleFloatRepr e1 e2
+          (XDouble e1, XDouble e2)-> XDouble <$> fpOp WFP.DoubleFloatRepr e1 e2
           _ -> panic ["Unexpected values in numOp", show xe1, show xe2]
 
         bvOp :: (forall w . BVOp2 sym w)
@@ -752,18 +805,18 @@ translateOp2 origExpr sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
           (XWord64 e1, XWord64 e2) -> XWord64 <$> opU e1 e2
           _ -> panic ["Unexpected values in bvOp", show xe1, show xe2]
 
-        fpOp :: (forall fpp . FPOp2 sym fpp)
+        fpOp :: (forall fi . FPOp2 sym fi)
              -> XExpr sym
              -> XExpr sym
              -> IO (XExpr sym)
         fpOp op xe1 xe2 = case (xe1, xe2) of
-          (XFloat e1, XFloat e2) -> XFloat <$> op e1 e2
-          (XDouble e1, XDouble e2) -> XDouble <$> op e1 e2
+          (XFloat e1, XFloat e2) -> XFloat <$> op WFP.SingleFloatRepr e1 e2
+          (XDouble e1, XDouble e2) -> XDouble <$> op WFP.DoubleFloatRepr e1 e2
           _ -> panic ["Unexpected values in fpOp", show xe1, show xe2]
 
         cmp :: BoolCmp2 sym
             -> (forall w . BVCmp2 sym w)
-            -> (forall fpp . FPCmp2 sym fpp)
+            -> (forall fi . FPCmp2 sym fi)
             -> XExpr sym
             -> XExpr sym
             -> IO (XExpr sym)
@@ -777,13 +830,13 @@ translateOp2 origExpr sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
           (XWord16 e1, XWord16 e2)-> XBool <$> bvOp e1 e2
           (XWord32 e1, XWord32 e2)-> XBool <$> bvOp e1 e2
           (XWord64 e1, XWord64 e2)-> XBool <$> bvOp e1 e2
-          (XFloat e1, XFloat e2)-> XBool <$> fpOp e1 e2
-          (XDouble e1, XDouble e2)-> XBool <$> fpOp e1 e2
+          (XFloat e1, XFloat e2)-> XBool <$> fpOp WFP.SingleFloatRepr e1 e2
+          (XDouble e1, XDouble e2)-> XBool <$> fpOp WFP.DoubleFloatRepr e1 e2
           _ -> panic ["Unexpected values in cmp", show xe1, show xe2 ]
 
         numCmp :: (forall w . BVCmp2 sym w)
                -> (forall w . BVCmp2 sym w)
-               -> (forall fpp . FPCmp2 sym fpp)
+               -> (forall fi . FPCmp2 sym fi)
                -> XExpr sym
                -> XExpr sym
                -> IO (XExpr sym)
@@ -796,13 +849,13 @@ translateOp2 origExpr sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
           (XWord16 e1, XWord16 e2)-> XBool <$> bvUOp e1 e2
           (XWord32 e1, XWord32 e2)-> XBool <$> bvUOp e1 e2
           (XWord64 e1, XWord64 e2)-> XBool <$> bvUOp e1 e2
-          (XFloat e1, XFloat e2)-> XBool <$> fpOp e1 e2
-          (XDouble e1, XDouble e2)-> XBool <$> fpOp e1 e2
+          (XFloat e1, XFloat e2)-> XBool <$> fpOp WFP.SingleFloatRepr e1 e2
+          (XDouble e1, XDouble e2)-> XBool <$> fpOp WFP.DoubleFloatRepr e1 e2
           _ -> panic ["Unexpected values in numCmp", show xe1, show xe2]
 
 
 translateOp3 :: forall sym a b c d .
-  WI.IsExprBuilder sym =>
+  WFP.IsInterpretedFloatExprBuilder sym =>
   CE.Expr d {- ^ Original value we are translating -} ->
   sym ->
   CE.Op3 a b c d ->
@@ -819,7 +872,7 @@ translateOp3 origExpr _sym _op xe1 xe2 xe3 =
 -- | Build a mux tree for array indexing.
 --   TODO, add special case for concrete index value.
 buildIndexExpr :: forall sym n.
-  (1 <= n, WI.IsExprBuilder sym) =>
+  (1 <= n, WFP.IsInterpretedFloatExprBuilder sym) =>
   sym ->
   WI.SymBV sym 32 {- ^ Index -} ->
   V.Vector n (XExpr sym) {- ^ Elements -} ->
@@ -839,8 +892,8 @@ buildIndexExpr sym ix = loop 0
         mkIte sym ixEq xe rstExpr
 
 mkIte ::
-  WI.IsExprBuilder sym =>
-  sym -> 
+  WFP.IsInterpretedFloatExprBuilder sym =>
+  sym ->
   WI.Pred sym ->
   XExpr sym ->
   XExpr sym ->
@@ -855,8 +908,8 @@ mkIte sym pred xe1 xe2 = case (xe1, xe2) of
       (XWord16 e1, XWord16 e2) -> XWord16 <$> WI.bvIte sym pred e1 e2
       (XWord32 e1, XWord32 e2) -> XWord32 <$> WI.bvIte sym pred e1 e2
       (XWord64 e1, XWord64 e2) -> XWord64 <$> WI.bvIte sym pred e1 e2
-      (XFloat e1, XFloat e2) -> XFloat <$> WI.floatIte sym pred e1 e2
-      (XDouble e1, XDouble e2) -> XDouble <$> WI.floatIte sym pred e1 e2
+      (XFloat e1, XFloat e2) -> XFloat <$> WFP.iFloatIte @_ @WFP.SingleFloat sym pred e1 e2
+      (XDouble e1, XDouble e2) -> XDouble <$> WFP.iFloatIte @_ @WFP.DoubleFloat sym pred e1 e2
       (XStruct xes1, XStruct xes2) ->
         XStruct <$> zipWithM (mkIte sym pred) xes1 xes2
       (XEmptyArray, XEmptyArray) -> return XEmptyArray
@@ -867,7 +920,7 @@ mkIte sym pred xe1 xe2 = case (xe1, xe2) of
       _ -> panic ["Unexpected values in ite", show xe1, show xe2]
 
 castOp ::
-  WI.IsExprBuilder sym =>
+  WFP.IsInterpretedFloatExprBuilder sym =>
   CE.Expr a {- ^ Original value we are translating -} ->
   sym ->
   CT.Type a {- ^ Type we are casting to -} ->
@@ -931,28 +984,28 @@ castOp origExpr sym tp xe = case (xe, tp) of
    (XInt16 e, CT.Int8)    -> XInt8   <$> WI.bvTrunc sym knownNat e
 
    -- signed integer to float
-   (XInt64 e, CT.Float)   -> XFloat  <$> WI.sbvToFloat sym knownRepr fpRM e
-   (XInt32 e, CT.Float)   -> XFloat  <$> WI.sbvToFloat sym knownRepr fpRM e
-   (XInt16 e, CT.Float)   -> XFloat  <$> WI.sbvToFloat sym knownRepr fpRM e
-   (XInt8 e, CT.Float)    -> XFloat  <$> WI.sbvToFloat sym knownRepr fpRM e
+   (XInt64 e, CT.Float)   -> XFloat  <$> WFP.iSBVToFloat sym WFP.SingleFloatRepr fpRM e
+   (XInt32 e, CT.Float)   -> XFloat  <$> WFP.iSBVToFloat sym WFP.SingleFloatRepr fpRM e
+   (XInt16 e, CT.Float)   -> XFloat  <$> WFP.iSBVToFloat sym WFP.SingleFloatRepr fpRM e
+   (XInt8 e, CT.Float)    -> XFloat  <$> WFP.iSBVToFloat sym WFP.SingleFloatRepr fpRM e
 
    -- unsigned integer to float
-   (XWord64 e, CT.Float)  -> XFloat  <$> WI.bvToFloat sym knownRepr fpRM e
-   (XWord32 e, CT.Float)  -> XFloat  <$> WI.bvToFloat sym knownRepr fpRM e
-   (XWord16 e, CT.Float)  -> XFloat  <$> WI.bvToFloat sym knownRepr fpRM e
-   (XWord8 e, CT.Float)   -> XFloat  <$> WI.bvToFloat sym knownRepr fpRM e
+   (XWord64 e, CT.Float)  -> XFloat  <$> WFP.iBVToFloat sym WFP.SingleFloatRepr fpRM e
+   (XWord32 e, CT.Float)  -> XFloat  <$> WFP.iBVToFloat sym WFP.SingleFloatRepr fpRM e
+   (XWord16 e, CT.Float)  -> XFloat  <$> WFP.iBVToFloat sym WFP.SingleFloatRepr fpRM e
+   (XWord8 e, CT.Float)   -> XFloat  <$> WFP.iBVToFloat sym WFP.SingleFloatRepr fpRM e
 
    -- signed integer to double
-   (XInt64 e, CT.Double)  -> XDouble <$> WI.sbvToFloat sym knownRepr fpRM e
-   (XInt32 e, CT.Double)  -> XDouble <$> WI.sbvToFloat sym knownRepr fpRM e
-   (XInt16 e, CT.Double)  -> XDouble <$> WI.sbvToFloat sym knownRepr fpRM e
-   (XInt8 e, CT.Double)   -> XDouble <$> WI.sbvToFloat sym knownRepr fpRM e
+   (XInt64 e, CT.Double)  -> XDouble <$> WFP.iSBVToFloat sym WFP.DoubleFloatRepr fpRM e
+   (XInt32 e, CT.Double)  -> XDouble <$> WFP.iSBVToFloat sym WFP.DoubleFloatRepr fpRM e
+   (XInt16 e, CT.Double)  -> XDouble <$> WFP.iSBVToFloat sym WFP.DoubleFloatRepr fpRM e
+   (XInt8 e, CT.Double)   -> XDouble <$> WFP.iSBVToFloat sym WFP.DoubleFloatRepr fpRM e
 
    -- unsigned integer to double
-   (XWord64 e, CT.Double) -> XDouble <$> WI.bvToFloat sym knownRepr fpRM e
-   (XWord32 e, CT.Double) -> XDouble <$> WI.bvToFloat sym knownRepr fpRM e
-   (XWord16 e, CT.Double) -> XDouble <$> WI.bvToFloat sym knownRepr fpRM e
-   (XWord8 e, CT.Double)  -> XDouble <$> WI.bvToFloat sym knownRepr fpRM e
+   (XWord64 e, CT.Double) -> XDouble <$> WFP.iBVToFloat sym WFP.DoubleFloatRepr fpRM e
+   (XWord32 e, CT.Double) -> XDouble <$> WFP.iBVToFloat sym WFP.DoubleFloatRepr fpRM e
+   (XWord16 e, CT.Double) -> XDouble <$> WFP.iBVToFloat sym WFP.DoubleFloatRepr fpRM e
+   (XWord8 e, CT.Double)  -> XDouble <$> WFP.iBVToFloat sym WFP.DoubleFloatRepr fpRM e
 
    -- unsigned to signed conversion
    (XWord64 e, CT.Int64)  -> return $ XInt64 e

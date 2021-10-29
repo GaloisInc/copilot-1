@@ -508,10 +508,8 @@ translateOp1 origExpr sym op xe = case (op, xe) of
                        neg_e <- WI.bvSub sym zero e
                        WI.bvIte sym e_neg neg_e e
           fpAbs :: forall fi . FPOp1 sym fi
-          fpAbs fiRepr e = do zero <- WFP.iFloatPZero sym fiRepr
-                              e_neg <- WFP.iFloatLt @_ @fi sym e zero
-                              neg_e <- WFP.iFloatSub @_ @fi sym fpRM zero e
-                              WFP.iFloatIte @_ @fi sym e_neg neg_e e
+          fpAbs _fiRepr e = WFP.iFloatAbs @_ @fi sym e
+
   (CE.Sign _, xe) -> numOp bvSign fpSign xe
     where bvSign :: BVOp1 sym w
           bvSign e = do zero <- WI.bvLit sym knownRepr (BV.zero knownNat)
@@ -676,6 +674,7 @@ translateOp2 origExpr sym op xe1 xe2 = case (op, xe1, xe2) of
   (CE.Eq _, xe1, xe2) -> cmp (WI.eqPred sym) (WI.bvEq sym)
                              (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatEq @_ @fi sym)
                              xe1 xe2
+ -- TODO, I think we can simplify this and pull the `not` outside
   (CE.Ne _, xe1, xe2) -> cmp neqPred bvNeq fpNeq xe1 xe2
     where neqPred :: BoolCmp2 sym
           neqPred e1 e2 = do e <- WI.eqPred sym e1 e2

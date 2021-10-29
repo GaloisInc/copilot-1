@@ -56,9 +56,16 @@ transexpr (Op3 op e1 e2 e3) = do
 transop1 :: Op1 a b -> C.Expr -> C.Expr
 transop1 op e = case op of
   Not             -> (C..!) e
+  Abs      Float  -> funcall "fabsf"    [e]
+  Abs      Double -> funcall "fabs"     [e]
   Abs      _      -> funcall "abs"      [e]
-  Sign     _      -> funcall "copysign" [C.LitDouble 1.0, e]
-  Recip    _      -> C.LitDouble 1.0 C../ e
+
+  Sign     Double -> funcall "copysign" [C.LitDouble 1.0, e]
+  Sign     Float  -> funcall "fcopysign" [C.LitFloat 1.0, e]
+
+  Recip    Double -> C.LitDouble 1.0 C../ e
+  Recip    Float  -> C.LitFloat 1.0 C../ e
+
   Exp      _      -> funcall "exp"   [e]
   Sqrt     _      -> funcall "sqrt"  [e]
   Log      _      -> funcall "log"   [e]

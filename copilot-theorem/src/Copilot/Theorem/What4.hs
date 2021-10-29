@@ -164,7 +164,7 @@ prove solver spec = do
             WS.Unknown -> return (CS.propertyName pr, Unknown)
 
   -- Execute the action and return the results for each property
-  runTransM sym spec proveProperties
+  runTransM spec proveProperties
 
 
 data BisimulationProofState sym =
@@ -191,7 +191,7 @@ computeBisimulationProofBundle ::
   IO (BisimulationProofBundle sym)
 computeBisimulationProofBundle sym properties spec =
   do iss <- computeInitialStreamState sym spec
-     runTransM sym spec $
+     runTransM spec $
        do prestate  <- computePrestate sym spec
           poststate <- computePoststate sym spec
           triggers  <- computeTriggerState sym spec

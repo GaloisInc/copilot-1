@@ -56,6 +56,7 @@ import qualified What4.Expr.GroundEval          as WG
 import qualified What4.Interface                as WI
 import qualified What4.InterpretedFloatingPoint as WFP
 import qualified What4.BaseTypes                as WT
+import qualified What4.SpecialFunctions         as WSF
 
 import Control.Monad.State
 import qualified Data.Binary.IEEE754 as IEEE754
@@ -135,16 +136,7 @@ data TransState sym = TransState {
   streamValues :: Map.Map (CE.Id, StreamOffset) (XExpr sym),
 
   -- | A cache to look up stream definitions by their Id.
-  streams :: Map.Map CE.Id CS.Stream,
-
-  -- | Binary power operator, represented as an uninterpreted function.
-  pow :: WI.SymFn sym
-         (EmptyCtx ::> WT.BaseRealType ::> WT.BaseRealType)
-         WT.BaseRealType,
-  -- | Binary logarithm operator, represented as an uninterpreted function.
-  logb :: WI.SymFn sym
-          (EmptyCtx ::> WT.BaseRealType ::> WT.BaseRealType)
-          WT.BaseRealType
+  streams :: Map.Map CE.Id CS.Stream
   }
 
 newtype TransM sym a = TransM { unTransM :: StateT (TransState sym) IO a }
@@ -169,20 +161,16 @@ instance Panic.PanicComponent CopilotWhat4 where
 panic :: (Panic.HasCallStack, MonadIO m) => [String] -> m a
 panic msg = Panic.panic CopilotWhat4 "Ill-typed core expression" msg
 
-runTransM :: WI.IsSymExprBuilder sym => sym -> CS.Spec -> TransM sym a -> IO a
-runTransM sym spec m =
+runTransM :: CS.Spec -> TransM sym a -> IO a
+runTransM spec m =
   do -- Build up initial translation state
      let streamMap = Map.fromList $
            (\stream -> (CS.streamId stream, stream)) <$> CS.specStreams spec
-     pow <- WI.freshTotalUninterpFn sym (WI.safeSymbol "pow") knownRepr knownRepr
-     logb <- WI.freshTotalUninterpFn sym (WI.safeSymbol "logb") knownRepr knownRepr
-     let st = TransState
+         st = TransState
               { mentionedExternals = mempty
               , externVars = mempty
               , streamValues = mempty
               , streams = streamMap
-              , pow = pow
-              , logb = logb
               }
 
      (res, _) <- runStateT (unTransM m) st
@@ -471,9 +459,7 @@ translateExpr sym localEnv e offset = case e of
   CE.Op2 op e1 e2 ->
     do xe1 <- translateExpr sym localEnv e1 offset
        xe2 <- translateExpr sym localEnv e2 offset
-       powFn <- gets pow
-       logbFn <- gets logb
-       liftIO $ translateOp2 e sym powFn logbFn op xe1 xe2
+       liftIO $ translateOp2 e sym op xe1 xe2
   CE.Op3 op e1 e2 e3 ->
     do xe1 <- translateExpr sym localEnv e1 offset
        xe2 <- translateExpr sym localEnv e2 offset
@@ -504,8 +490,6 @@ type FPOp1 sym fi =
   WFP.FloatInfoRepr fi ->
   WI.SymExpr sym (WFP.SymInterpretedFloatType sym fi) ->
   IO (WI.SymExpr sym (WFP.SymInterpretedFloatType sym fi))
-
-type RealOp1 sym = WI.SymExpr sym WT.BaseRealType -> IO (WI.SymExpr sym WT.BaseRealType)
 
 translateOp1 :: forall sym a b.
   WFP.IsInterpretedFloatExprBuilder sym =>
@@ -553,23 +537,20 @@ translateOp1 origExpr sym op xe = case (op, xe) of
       recip fiRepr e = do one <- fpLit fiRepr 1.0
                           WFP.iFloatDiv @_ @fi sym fpRM one e
   (CE.Sqrt _, xe) -> fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatSqrt @_ @fi sym fpRM) xe
-
-  (CE.Exp _, xe) -> realOp (WI.realExp sym) xe
-  (CE.Log _, xe) -> realOp (WI.realLog sym) xe
-  (CE.Sin _, xe) -> realOp (WI.realSin sym) xe
-  (CE.Cos _, xe) -> realOp (WI.realCos sym) xe
-  (CE.Tan _, xe) -> realOp (WI.realTan sym) xe
-  (CE.Sinh _, xe) -> realOp (WI.realSinh sym) xe
-  (CE.Cosh _, xe) -> realOp (WI.realCosh sym) xe
-  (CE.Tanh _, xe) -> realOp (WI.realTanh sym) xe
-
-  -- TODO, these inverse function definitions are bogus...
-  (CE.Asin _, xe) -> realOp (realRecip <=< WI.realSin sym) xe
-  (CE.Acos _, xe) -> realOp (realRecip <=< WI.realCos sym) xe
-  (CE.Atan _, xe) -> realOp (realRecip <=< WI.realTan sym) xe
-  (CE.Asinh _, xe) -> realOp (realRecip <=< WI.realSinh sym) xe
-  (CE.Acosh _, xe) -> realOp (realRecip <=< WI.realCosh sym) xe
-  (CE.Atanh _, xe) -> realOp (realRecip <=< WI.realTanh sym) xe
+  (CE.Exp _, xe) -> fpSpecialOp WSF.Exp xe
+  (CE.Log _, xe) -> fpSpecialOp WSF.Log xe
+  (CE.Sin _, xe) -> fpSpecialOp WSF.Sin xe
+  (CE.Cos _, xe) -> fpSpecialOp WSF.Cos xe
+  (CE.Tan _, xe) -> fpSpecialOp WSF.Tan xe
+  (CE.Sinh _, xe) -> fpSpecialOp WSF.Sinh xe
+  (CE.Cosh _, xe) -> fpSpecialOp WSF.Cosh xe
+  (CE.Tanh _, xe) -> fpSpecialOp WSF.Tanh xe
+  (CE.Asin _, xe) -> fpSpecialOp WSF.Arcsin xe
+  (CE.Acos _, xe) -> fpSpecialOp WSF.Arccos xe
+  (CE.Atan _, xe) -> fpSpecialOp WSF.Arctan xe
+  (CE.Asinh _, xe) -> fpSpecialOp WSF.Arcsinh xe
+  (CE.Acosh _, xe) -> fpSpecialOp WSF.Arccosh xe
+  (CE.Atanh _, xe) -> fpSpecialOp WSF.Arctanh xe
 
   (CE.BwNot _, xe) -> case xe of
     XBool e -> XBool <$> WI.notPred sym e
@@ -620,16 +601,9 @@ translateOp1 origExpr sym op xe = case (op, xe) of
       XDouble e -> XDouble <$> g WFP.DoubleFloatRepr e
       _ -> panic [ "Unexpected value in fpOp", show xe ]
 
-    realOp :: RealOp1 sym -> XExpr sym -> IO (XExpr sym)
-    realOp h xe = fpOp hf xe
-      where hf :: forall fi . FPOp1 sym fi
-            hf fiRepr e = do re <- WFP.iFloatToReal @_ @fi sym e
-                             hre <- h re
-                             WFP.iRealToFloat sym fiRepr fpRM hre
-
-    realRecip :: RealOp1 sym
-    realRecip e = do one <- WI.realLit sym 1
-                     WI.realDiv sym one e
+    fpSpecialOp :: WSF.SpecialFunction (EmptyCtx ::> WSF.R)
+                -> XExpr sym -> IO (XExpr sym)
+    fpSpecialOp fn = fpOp (\fiRepr -> WFP.iFloatSpecialFunction1 sym fiRepr fn)
 
     fpLit :: forall fi.
              WFP.FloatInfoRepr fi ->
@@ -650,9 +624,6 @@ type FPOp2 sym fi =
   WI.SymExpr sym (WFP.SymInterpretedFloatType sym fi) ->
   IO (WI.SymExpr sym (WFP.SymInterpretedFloatType sym fi))
 
-type RealOp2 sym =
-  WI.SymExpr sym WT.BaseRealType -> WI.SymExpr sym WT.BaseRealType -> IO (WI.SymExpr sym WT.BaseRealType)
-
 type BoolCmp2 sym = WI.Pred sym -> WI.Pred sym -> IO (WI.Pred sym)
 
 type BVCmp2 sym w = (KnownNat w, 1 <= w) => WI.SymBV sym w -> WI.SymBV sym w -> IO (WI.Pred sym)
@@ -667,19 +638,11 @@ translateOp2 :: forall sym a b c.
    WFP.IsInterpretedFloatSymExprBuilder sym =>
    CE.Expr c {- ^ Original value we are translating -} ->
    sym ->
-   (WI.SymFn sym
-       (EmptyCtx ::> WT.BaseRealType ::> WT.BaseRealType)
-       WT.BaseRealType)
-     {- ^ Pow function -} ->
-   (WI.SymFn sym
-       (EmptyCtx ::> WT.BaseRealType ::> WT.BaseRealType)
-       WT.BaseRealType)
-     {- ^ Logb function -} ->
    CE.Op2 a b c ->
    XExpr sym ->
    XExpr sym ->
    IO (XExpr sym)
-translateOp2 origExpr sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
+translateOp2 origExpr sym op xe1 xe2 = case (op, xe1, xe2) of
   (CE.And, XBool e1, XBool e2) -> XBool <$> WI.andPred sym e1 e2
   (CE.Or, XBool e1, XBool e2) -> XBool <$> WI.orPred sym e1 e2
   (CE.Add _, xe1, xe2) -> numOp (WI.bvAdd sym)
@@ -695,22 +658,18 @@ translateOp2 origExpr sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
   (CE.Div _, xe1, xe2) -> bvOp (WI.bvSdiv sym) (WI.bvUdiv sym) xe1 xe2
   (CE.Fdiv _, xe1, xe2) -> fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatDiv @_ @fi sym fpRM)
                                 xe1 xe2
-  (CE.Pow _, xe1, xe2) -> fpOp powFn' xe1 xe2
+  (CE.Pow _, xe1, xe2) -> fpOp powFn xe1 xe2
     where
-      powFn' :: forall fi . FPOp2 sym fi
-      powFn' fiRepr e1 e2 = do re1 <- WFP.iFloatToReal @_ @fi sym e1
-                               re2 <- WFP.iFloatToReal @_ @fi sym e2
-                               let args = (Empty :> re1 :> re2)
-                               rpow <- WI.applySymFn sym powFn args
-                               WFP.iRealToFloat sym fiRepr fpRM rpow
-  (CE.Logb _, xe1, xe2) -> fpOp logbFn' xe1 xe2
+      powFn :: forall fi . FPOp2 sym fi
+      powFn fiRepr = WFP.iFloatSpecialFunction2 sym fiRepr WSF.Pow
+  (CE.Logb _, xe1, xe2) -> fpOp logbFn xe1 xe2
     where
-      logbFn' :: forall fi . FPOp2 sym fi
-      logbFn' fiRepr e1 e2 = do re1 <- WFP.iFloatToReal @_ @fi sym e1
-                                re2 <- WFP.iFloatToReal @_ @fi sym e2
-                                let args = (Empty :> re1 :> re2)
-                                rpow <- WI.applySymFn sym logbFn args
-                                WFP.iRealToFloat sym fiRepr fpRM rpow
+      logbFn :: forall fi . FPOp2 sym fi
+      -- Implement logb(e1,e2) as log(e2)/log(e1). This matches how copilot-c99
+      -- translates Logb to C code.
+      logbFn fiRepr e1 e2 = do re1 <- WFP.iFloatSpecialFunction1 sym fiRepr WSF.Log e1
+                               re2 <- WFP.iFloatSpecialFunction1 sym fiRepr WSF.Log e2
+                               WFP.iFloatDiv @_ @fi sym fpRM re2 re1
   (CE.Eq _, xe1, xe2) -> cmp (WI.eqPred sym) (WI.bvEq sym)
                              (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatEq @_ @fi sym)
                              xe1 xe2

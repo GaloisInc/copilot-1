@@ -551,6 +551,8 @@ translateOp1 origExpr sym op xe = case (op, xe) of
   (CE.Asinh _, xe) -> fpSpecialOp WSF.Arcsinh xe
   (CE.Acosh _, xe) -> fpSpecialOp WSF.Arccosh xe
   (CE.Atanh _, xe) -> fpSpecialOp WSF.Arctanh xe
+  (CE.Ceiling _, xe) -> fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatRound @_ @fi sym WI.RTP) xe
+  (CE.Floor _, xe) -> fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatRound @_ @fi sym WI.RTN) xe
 
   (CE.BwNot _, xe) -> case xe of
     XBool e -> XBool <$> WI.notPred sym e
@@ -658,10 +660,7 @@ translateOp2 origExpr sym op xe1 xe2 = case (op, xe1, xe2) of
   (CE.Div _, xe1, xe2) -> bvOp (WI.bvSdiv sym) (WI.bvUdiv sym) xe1 xe2
   (CE.Fdiv _, xe1, xe2) -> fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatDiv @_ @fi sym fpRM)
                                 xe1 xe2
-  (CE.Pow _, xe1, xe2) -> fpOp powFn xe1 xe2
-    where
-      powFn :: forall fi . FPOp2 sym fi
-      powFn fiRepr = WFP.iFloatSpecialFunction2 sym fiRepr WSF.Pow
+  (CE.Pow _, xe1, xe2) -> fpSpecialOp WSF.Pow xe1 xe2
   (CE.Logb _, xe1, xe2) -> fpOp logbFn xe1 xe2
     where
       logbFn :: forall fi . FPOp2 sym fi
@@ -670,6 +669,7 @@ translateOp2 origExpr sym op xe1 xe2 = case (op, xe1, xe2) of
       logbFn fiRepr e1 e2 = do re1 <- WFP.iFloatSpecialFunction1 sym fiRepr WSF.Log e1
                                re2 <- WFP.iFloatSpecialFunction1 sym fiRepr WSF.Log e2
                                WFP.iFloatDiv @_ @fi sym fpRM re2 re1
+  (CE.Atan2 _, xe1, xe2) -> fpSpecialOp WSF.Arctan2 xe1 xe2
   (CE.Eq _, xe1, xe2) -> cmp (WI.eqPred sym) (WI.bvEq sym)
                              (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatEq @_ @fi sym)
                              xe1 xe2
@@ -779,6 +779,10 @@ translateOp2 origExpr sym op xe1 xe2 = case (op, xe1, xe2) of
       (XFloat e1, XFloat e2) -> XFloat <$> op WFP.SingleFloatRepr e1 e2
       (XDouble e1, XDouble e2) -> XDouble <$> op WFP.DoubleFloatRepr e1 e2
       _ -> panic ["Unexpected values in fpOp", show xe1, show xe2]
+
+    fpSpecialOp :: WSF.SpecialFunction (EmptyCtx ::> WSF.R ::> WSF.R)
+                -> XExpr sym -> XExpr sym -> IO (XExpr sym)
+    fpSpecialOp fn = fpOp (\fiRepr -> WFP.iFloatSpecialFunction2 sym fiRepr fn)
 
     cmp :: BoolCmp2 sym
         -> (forall w . BVCmp2 sym w)

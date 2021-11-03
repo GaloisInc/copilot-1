@@ -566,7 +566,7 @@ translateOp1 origExpr sym op xe = case (op, xe) of
     case mIx of
       Just ix -> return $ xes !! ix
       Nothing -> panic ["Could not find field " ++ show fieldNameRepr, show s ]
-  _ -> panic ["Unexpected value for op: " ++ show (CP.ppExpr origExpr), show xe ]
+  (CE.GetField{}, _) -> unexpectedValue "get-field operation"
   where
     numOp :: (forall w . BVOp1 sym w)
           -> (forall fi . FPOp1 sym fi)
@@ -583,7 +583,7 @@ translateOp1 origExpr sym op xe = case (op, xe) of
       XWord64 e -> XWord64 <$> bvOp e
       XFloat e -> XFloat <$> fpOp WFP.SingleFloatRepr e
       XDouble e -> XDouble <$> fpOp WFP.DoubleFloatRepr e
-      _ -> panic [ "Unexpected value in numOp", show xe ]
+      _ -> unexpectedValue "numOp"
 
     bvOp :: (forall w . BVOp1 sym w) -> XExpr sym -> IO (XExpr sym)
     bvOp f xe = case xe of
@@ -595,13 +595,13 @@ translateOp1 origExpr sym op xe = case (op, xe) of
       XWord16 e -> XWord16 <$> f e
       XWord32 e -> XWord32 <$> f e
       XWord64 e -> XWord64 <$> f e
-      _ -> panic [ "Unexpected value in bvOp", show xe ]
+      _ -> unexpectedValue "bvOp"
 
     fpOp :: (forall fi . FPOp1 sym fi) -> XExpr sym -> IO (XExpr sym)
     fpOp g xe = case xe of
       XFloat e -> XFloat <$> g WFP.SingleFloatRepr e
       XDouble e -> XDouble <$> g WFP.DoubleFloatRepr e
-      _ -> panic [ "Unexpected value in fpOp", show xe ]
+      _ -> unexpectedValue "fpOp"
 
     fpSpecialOp :: WSF.SpecialFunction (EmptyCtx ::> WSF.R)
                 -> XExpr sym -> IO (XExpr sym)
@@ -616,6 +616,11 @@ translateOp1 origExpr sym op xe = case (op, xe) of
         WFP.SingleFloatRepr -> WFP.iFloatLitSingle sym fracLit
         WFP.DoubleFloatRepr -> WFP.iFloatLitDouble sym fracLit
         _ -> panic ["Expected single- or double-precision float", show fiRepr]
+
+    unexpectedValue :: forall x. Panic.HasCallStack => String -> IO x
+    unexpectedValue op =
+      panic [ "Unexpected value in " ++ op ++ ": " ++ show (CP.ppExpr origExpr)
+            , show xe ]
 
 type BVOp2 sym w = (KnownNat w, 1 <= w) =>
   WI.SymBV sym w -> WI.SymBV sym w -> IO (WI.SymBV sym w)
@@ -647,6 +652,8 @@ translateOp2 :: forall sym a b c.
 translateOp2 origExpr sym op xe1 xe2 = case (op, xe1, xe2) of
   (CE.And, XBool e1, XBool e2) -> XBool <$> WI.andPred sym e1 e2
   (CE.Or, XBool e1, XBool e2) -> XBool <$> WI.orPred sym e1 e2
+  (CE.And, _, _) -> unexpectedValues "and operation"
+  (CE.Or, _, _) -> unexpectedValues "or operation"
   (CE.Add _, xe1, xe2) -> numOp (WI.bvAdd sym)
                                 (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatAdd @_ @fi sym fpRM)
                                 xe1 xe2
@@ -733,8 +740,7 @@ translateOp2 origExpr sym op xe1 xe2 = case (op, xe1, xe2) of
   (CE.Index _, xe1, xe2) -> do
     case (xe1, xe2) of
       (XArray xes, XWord32 ix) -> buildIndexExpr sym ix xes
-      _ -> panic ["Unexpected values in index operation", show xe1, show xe2]
-  _ -> panic [ "Unexpected values in binary op: "++ show (CP.ppExpr origExpr), show xe1, show xe2 ]
+      _ -> unexpectedValues "index operation"
 
   where
     numOp :: (forall w . BVOp2 sym w)
@@ -753,7 +759,7 @@ translateOp2 origExpr sym op xe1 xe2 = case (op, xe1, xe2) of
       (XWord64 e1, XWord64 e2)-> XWord64 <$> bvOp e1 e2
       (XFloat e1, XFloat e2)-> XFloat <$> fpOp WFP.SingleFloatRepr e1 e2
       (XDouble e1, XDouble e2)-> XDouble <$> fpOp WFP.DoubleFloatRepr e1 e2
-      _ -> panic ["Unexpected values in numOp", show xe1, show xe2]
+      _ -> unexpectedValues "numOp"
 
     bvOp :: (forall w . BVOp2 sym w)
          -> (forall w . BVOp2 sym w)
@@ -769,7 +775,7 @@ translateOp2 origExpr sym op xe1 xe2 = case (op, xe1, xe2) of
       (XWord16 e1, XWord16 e2) -> XWord16 <$> opU e1 e2
       (XWord32 e1, XWord32 e2) -> XWord32 <$> opU e1 e2
       (XWord64 e1, XWord64 e2) -> XWord64 <$> opU e1 e2
-      _ -> panic ["Unexpected values in bvOp", show xe1, show xe2]
+      _ -> unexpectedValues "bvOp"
 
     fpOp :: (forall fi . FPOp2 sym fi)
          -> XExpr sym
@@ -778,7 +784,7 @@ translateOp2 origExpr sym op xe1 xe2 = case (op, xe1, xe2) of
     fpOp op xe1 xe2 = case (xe1, xe2) of
       (XFloat e1, XFloat e2) -> XFloat <$> op WFP.SingleFloatRepr e1 e2
       (XDouble e1, XDouble e2) -> XDouble <$> op WFP.DoubleFloatRepr e1 e2
-      _ -> panic ["Unexpected values in fpOp", show xe1, show xe2]
+      _ -> unexpectedValues "fpOp"
 
     fpSpecialOp :: WSF.SpecialFunction (EmptyCtx ::> WSF.R ::> WSF.R)
                 -> XExpr sym -> XExpr sym -> IO (XExpr sym)
@@ -802,7 +808,7 @@ translateOp2 origExpr sym op xe1 xe2 = case (op, xe1, xe2) of
       (XWord64 e1, XWord64 e2)-> XBool <$> bvOp e1 e2
       (XFloat e1, XFloat e2)-> XBool <$> fpOp WFP.SingleFloatRepr e1 e2
       (XDouble e1, XDouble e2)-> XBool <$> fpOp WFP.DoubleFloatRepr e1 e2
-      _ -> panic ["Unexpected values in cmp", show xe1, show xe2 ]
+      _ -> unexpectedValues "cmp"
 
     numCmp :: (forall w . BVCmp2 sym w)
            -> (forall w . BVCmp2 sym w)
@@ -821,7 +827,12 @@ translateOp2 origExpr sym op xe1 xe2 = case (op, xe1, xe2) of
       (XWord64 e1, XWord64 e2)-> XBool <$> bvUOp e1 e2
       (XFloat e1, XFloat e2)-> XBool <$> fpOp WFP.SingleFloatRepr e1 e2
       (XDouble e1, XDouble e2)-> XBool <$> fpOp WFP.DoubleFloatRepr e1 e2
-      _ -> panic ["Unexpected values in numCmp", show xe1, show xe2]
+      _ -> unexpectedValues "numCmp"
+
+    unexpectedValues :: forall x. Panic.HasCallStack => String -> IO x
+    unexpectedValues op =
+      panic [ "Unexpected values in " ++ op ++ ": " ++ show (CP.ppExpr origExpr)
+            , show xe1, show xe2 ]
 
 translateOp3 :: forall sym a b c d .
   WFP.IsInterpretedFloatExprBuilder sym =>
@@ -832,11 +843,15 @@ translateOp3 :: forall sym a b c d .
   XExpr sym ->
   XExpr sym ->
   IO (XExpr sym)
-translateOp3 _ sym (CE.Mux _) (XBool te) xe1 xe2 = mkIte sym te xe1 xe2
-translateOp3 origExpr _sym _op xe1 xe2 xe3 =
-  panic ["Unexpected values in 3-place op"
-        , show (CP.ppExpr origExpr), show xe1, show xe2, show xe3
-        ]
+translateOp3 origExpr sym op xe1 xe2 xe3 = case (op, xe1, xe2, xe3) of
+  (CE.Mux _, XBool te, xe1, xe2) -> mkIte sym te xe1 xe2
+  (CE.Mux _, _, _, _) -> unexpectedValues "mux operation"
+
+  where unexpectedValues :: forall x. Panic.HasCallStack => String -> IO x
+        unexpectedValues op =
+          panic [ "Unexpected values in " ++ op ++ ":"
+                , show (CP.ppExpr origExpr), show xe1, show xe2, show xe3
+                ]
 
 -- | Build a mux tree for array indexing.
 --   TODO, add special case for concrete index value.

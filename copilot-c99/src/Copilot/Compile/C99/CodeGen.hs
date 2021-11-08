@@ -47,7 +47,14 @@ mkbuffdecln sid ty xs = C.VarDecln (Just C.Static) cty name initvals where
   name     = streamname sid
   cty      = C.Array (transtype ty) (Just $ C.LitInt $ fromIntegral buffsize)
   buffsize = length xs
-  initvals = Just $ C.InitArray $ map (C.InitExpr . constty ty) xs
+  initvals = Just $ C.InitArray $ constarray ty xs
+
+  -- Avoid casting array elements in an array initializer. This is a workaround
+  -- for https://github.com/Copilot-Language/copilot/issues/276.
+  constarray :: Type a -> [a] -> [C.Init]
+  constarray ty xs = case ty of
+    Array ty' -> map (C.InitArray . constarray ty' . arrayelems) xs
+    _         -> map (C.InitExpr . constty ty) xs
 
 -- | Make a C index variable and initialise it to 0.
 mkindexdecln :: Id -> C.Decln

@@ -142,7 +142,11 @@ compileh cSettings spec = C.TransUnit declns [] where
     extfundecln (Trigger name _ args) = C.FunDecln Nothing cty name params where
         cty    = C.TypeSpec C.Void
         params = map mkparam $ zip (argnames name) args
-        mkparam (name, UExpr ty _) = C.Param (transtype ty) name
+        mkparam (name, UExpr ty _) = C.Param (mkparamty ty) name
+
+        mkparamty ty = case ty of
+          Struct _ -> C.Const (C.Ptr (transtype ty))
+          _        -> transtype ty
 
   -- Declaration for the step function.
   stepdecln :: C.Decln

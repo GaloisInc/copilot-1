@@ -81,12 +81,16 @@ mkstep cSettings streams triggers exts =
 
   void = C.TypeSpec C.Void
   stmts  =  map mkexcopy exts
-         ++ map mktriggercheck triggers
+         ++ triggerstmts
          ++ tmpassigns
          ++ bufferupdates
          ++ indexupdates
-  (declns, tmpassigns, bufferupdates, indexupdates) =
+  declns =  streamdeclns
+         ++ concat triggerdeclns
+  (streamdeclns, tmpassigns, bufferupdates, indexupdates) =
     unzip4 $ map mkupdateglobals streams
+  (triggerdeclns, triggerstmts) =
+    unzip $ map mktriggercheck triggers
 
   -- Write code to update global stream buffers and index.
   mkupdateglobals :: Stream -> (C.Decln, C.Stmt, C.Stmt, C.Stmt)
@@ -129,12 +133,42 @@ mkstep cSettings streams triggers exts =
     _       -> C.Ident cpyname C..= C.Ident name
 
   -- Make if-statement to check the guard, call the trigger if necessary.
-  mktriggercheck :: Trigger -> C.Stmt
-  mktriggercheck (Trigger name guard args) = C.If guard' firetrigger where
-    guard'      = C.Funcall (C.Ident $ guardname name) []
-    firetrigger = [C.Expr $ C.Funcall (C.Ident name) args'] where
-      args'        = take (length args) (map argcall (argnames name))
-      argcall name = C.Funcall (C.Ident name) []
+  mktriggercheck :: Trigger -> ([C.Decln], C.Stmt)
+  mktriggercheck (Trigger name guard args) =
+    (atmpdeclns, ifstmt)
+    where
+      atmpdeclns = zipWith (\tmp_var arg ->
+                             C.VarDecln Nothing (temptype arg) tmp_var Nothing)
+                           atempnames args
+        where
+          temptype (UExpr{uExprType = ty}) =
+            case ty of
+              -- If a temporary is being used to store an array, declare the
+              -- type of the temporary as a pointer, not an array. The problem
+              -- with declaring it as an array is that the `arg` function will
+              -- return a pointer, not an array, and C doesn't make it easy to
+              -- cast directly from an array to a pointer.
+              Array ty' -> C.Ptr $ transtype ty'
+              _         -> transtype ty
+
+      atempnames = take (length args) (argtempnames name)
+
+      ifstmt = C.If guard' firetrigger
+
+      guard' = C.Funcall (C.Ident $ guardname name) []
+
+      firetrigger = map C.Expr argassigns ++
+                    [C.Expr $ C.Funcall (C.Ident name) (zipWith passarg atempnames args)]
+        where
+          passarg atempname (UExpr{uExprType = ty}) = case ty of
+            Struct _ -> C.UnaryOp C.Ref $ C.Ident atempname
+            _        -> C.Ident atempname
+
+          argassigns   = zipWith (\atempname arg ->
+                                   C.AssignOp C.Assign (C.Ident atempname) arg)
+                                 atempnames args'
+          args'        = take (length args) (map argcall (argnames name))
+          argcall name = C.Funcall (C.Ident name) []
 
   -- Write a call to the memcpy function.
   memcpy :: C.Expr -> C.Expr -> C.Expr -> C.Expr

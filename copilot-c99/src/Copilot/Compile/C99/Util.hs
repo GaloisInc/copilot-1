@@ -55,9 +55,17 @@ guardname name = name ++ "_guard"
 argname :: String -> Int -> String
 argname name n = name ++ "_arg" ++ show n
 
+-- | Turn a trigger name into a name for a temporary variable for a trigger argument.
+argtempname :: String -> Int -> String
+argtempname name n = name ++ "_argtemp" ++ show n
+
 -- | Enumerate all argument names based on trigger name.
 argnames :: String -> [String]
 argnames base = [aname | n <- [0..], let aname = argname base n]
+
+-- | Enumerate all temporary variable names based on trigger name.
+argtempnames :: String -> [String]
+argtempnames base = [atempname | n <- [0..], let atempname = argtempname base n]
 
 -- | Define a C expression that calls a function with arguments.
 funcall :: C.Ident -> [C.Expr] -> C.Expr

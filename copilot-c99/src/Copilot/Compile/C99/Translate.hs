@@ -56,36 +56,93 @@ transexpr (Op3 op e1 e2 e3) = do
 transop1 :: Op1 a b -> C.Expr -> C.Expr
 transop1 op e = case op of
   Not             -> (C..!) e
+
   Abs      Float  -> funcall "fabsf"    [e]
   Abs      Double -> funcall "fabs"     [e]
   Abs      _      -> funcall "abs"      [e]
 
   Sign     Double -> funcall "copysign" [C.LitDouble 1.0, e]
   Sign     Float  -> funcall "fcopysign" [C.LitFloat 1.0, e]
+  Sign     _      -> error "Sign for integral values not yet supported" -- copilot-verifier#14
 
   Recip    Double -> C.LitDouble 1.0 C../ e
   Recip    Float  -> C.LitFloat 1.0 C../ e
+  Recip    _      -> fpOnly "Recip"
 
-  Exp      _      -> funcall "exp"   [e]
-  Sqrt     _      -> funcall "sqrt"  [e]
-  Log      _      -> funcall "log"   [e]
-  Sin      _      -> funcall "sin"   [e]
-  Tan      _      -> funcall "tan"   [e]
-  Cos      _      -> funcall "cos"   [e]
-  Asin     _      -> funcall "asin"  [e]
-  Atan     _      -> funcall "atan"  [e]
-  Acos     _      -> funcall "acos"  [e]
-  Sinh     _      -> funcall "sinh"  [e]
-  Tanh     _      -> funcall "tanh"  [e]
-  Cosh     _      -> funcall "cosh"  [e]
-  Asinh    _      -> funcall "asinh" [e]
-  Atanh    _      -> funcall "atanh" [e]
-  Acosh    _      -> funcall "acosh" [e]
-  Ceiling  _      -> funcall "ceil"  [e]
-  Floor    _      -> funcall "floor" [e]
+  Exp      Double -> funcall "exp"    [e]
+  Exp      Float  -> funcall "expf"   [e]
+  Exp      _      -> fpOnly "Exp"
+
+  Sqrt     Double -> funcall "sqrt"   [e]
+  Sqrt     Float  -> funcall "sqrtf"  [e]
+  Sqrt     _      -> fpOnly "Sqrt"
+
+  Log      Double -> funcall "log"    [e]
+  Log      Float  -> funcall "logf"   [e]
+  Log      _      -> fpOnly "Log"
+
+  Sin      Double -> funcall "sin"    [e]
+  Sin      Float  -> funcall "sinf"   [e]
+  Sin      _      -> fpOnly "Sin"
+
+  Tan      Double -> funcall "tan"    [e]
+  Tan      Float  -> funcall "tanf"   [e]
+  Tan      _      -> fpOnly "Tan"
+
+  Cos      Double -> funcall "cos"    [e]
+  Cos      Float  -> funcall "cosf"   [e]
+  Cos      _      -> fpOnly "Cos"
+
+  Asin     Double -> funcall "asin"   [e]
+  Asin     Float  -> funcall "asinf"  [e]
+  Asin     _      -> fpOnly "Asin"
+
+  Atan     Double -> funcall "atan"   [e]
+  Atan     Float  -> funcall "atanf"  [e]
+  Atan     _      -> fpOnly "Atan"
+
+  Acos     Double -> funcall "acos"   [e]
+  Acos     Float  -> funcall "acosf"  [e]
+  Acos     _      -> fpOnly "Acos"
+
+  Sinh     Double -> funcall "sinh"   [e]
+  Sinh     Float  -> funcall "sinhf"  [e]
+  Sinh     _      -> fpOnly "Sinh"
+
+  Tanh     Double -> funcall "tanh"   [e]
+  Tanh     Float  -> funcall "tanhf"  [e]
+  Tanh     _      -> fpOnly "Tanh"
+
+  Cosh     Double -> funcall "cosh"   [e]
+  Cosh     Float  -> funcall "coshf"  [e]
+  Cosh     _      -> fpOnly "Cosh"
+
+  Asinh    Double -> funcall "asinh"  [e]
+  Asinh    Float  -> funcall "asinhf" [e]
+  Asinh    _      -> fpOnly "Asinh"
+
+  Atanh    Double -> funcall "atanh"  [e]
+  Atanh    Float  -> funcall "atanhf" [e]
+  Atanh    _      -> fpOnly "Atanh"
+
+  Acosh    Double -> funcall "acosh"  [e]
+  Acosh    Float  -> funcall "acoshf" [e]
+  Acosh    _      -> fpOnly "Acosh"
+
+  Ceiling  Double -> funcall "ceil"   [e]
+  Ceiling  Float  -> funcall "ceilf"  [e]
+  Ceiling  _      -> fpOnly "Ceiling"
+
+  Floor    Double -> funcall "floor"  [e]
+  Floor    Float  -> funcall "floorf" [e]
+  Floor    _      -> fpOnly "Floor"
+
   BwNot    _      -> (C..~) e
+
   Cast     _ ty  -> C.Cast (transtypename ty) e
+
   GetField (Struct _)  _ f -> C.Dot e (accessorname f)
+  GetField _           _ _ -> error "GetStruct used on non-struct value"
 
 -- | Translates a Copilot binary operator and its arguments into a C99
 -- expression.
@@ -99,9 +156,19 @@ transop2 op e1 e2 = case op of
   Mod      _   -> e1 C..%  e2
   Div      _   -> e1 C../  e2
   Fdiv     _   -> e1 C../  e2
-  Pow      _   -> funcall "pow" [e1, e2]
-  Logb     _   -> funcall "log" [e2] C../ funcall "log" [e1]
-  Atan2    _   -> funcall "atan2" [e1, e2]
+
+  Pow      Double -> funcall "pow"  [e1, e2]
+  Pow      Float  -> funcall "powf" [e1, e2]
+  Pow      _      -> fpOnly "Pow"
+
+  Logb     Double -> funcall "log"  [e2] C../ funcall "log"  [e1]
+  Logb     Float  -> funcall "logf" [e2] C../ funcall "logf" [e1]
+  Logb     _      -> fpOnly "Logb"
+
+  Atan2    Double -> funcall "atan2"  [e1, e2]
+  Atan2    Float  -> funcall "atan2f" [e1, e2]
+  Atan2    _      -> fpOnly "Atan2"
+
   Eq       _   -> e1 C..== e2
   Ne       _   -> e1 C..!= e2
   Le       _   -> e1 C..<= e2
@@ -120,6 +187,9 @@ transop2 op e1 e2 = case op of
 transop3 :: Op3 a b c d -> C.Expr -> C.Expr -> C.Expr -> C.Expr
 transop3 op e1 e2 e3 = case op of
   Mux _ -> C.Cond e1 e2 e3
+
+fpOnly :: String -> a
+fpOnly name = error $ name ++ " only supported for floating-point values"
 
 -- | Transform a Copilot Core literal, based on its value and type, into a C99
 -- literal.

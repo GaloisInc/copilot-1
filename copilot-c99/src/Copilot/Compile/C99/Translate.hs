@@ -1,4 +1,5 @@
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE Rank2Types #-}
 
 -- | Translate Copilot Core expressions and operators to C99.
 module Copilot.Compile.C99.Translate
@@ -61,9 +62,20 @@ transop1 op e = case op of
   Abs      Double -> funcall "fabs"     [e]
   Abs      _      -> funcall "abs"      [e]
 
-  Sign     Double -> funcall "copysign" [C.LitDouble 1.0, e]
-  Sign     Float  -> funcall "fcopysign" [C.LitFloat 1.0, e]
-  Sign     _      -> error "Sign for integral values not yet supported" -- copilot-verifier#14
+  -- Implement `signum x` as `x > 0 ? 1 : (x < 0 ? -1 : x)`. This matches how
+  -- GHC implements signum and ensures that it returns result when x is
+  -- ±0 or NaN.
+  Sign     ty     -> C.Cond (C.BinaryOp C.GT e (mkLit 0)) (mkLit 1) $
+                     C.Cond (C.BinaryOp C.LT e (mkLit 0)) (mkLit (-1)) e
+    where
+      mkLit :: (forall a. Num a => a) -> C.Expr
+      mkLit lit =
+        case ty of
+          -- Ensure that we use LitFloat or LitDouble as appropriate to avoid
+          -- unwanted casts in the generated code.
+          Float  -> C.LitFloat lit
+          Double -> C.LitDouble lit
+          _      -> C.LitInt lit
 
   Recip    Double -> C.LitDouble 1.0 C../ e
   Recip    Float  -> C.LitFloat 1.0 C../ e

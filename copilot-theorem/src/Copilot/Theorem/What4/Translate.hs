@@ -511,22 +511,24 @@ translateOp1 origExpr sym op xe = case (op, xe) of
           fpAbs _fiRepr e = WFP.iFloatAbs @_ @fi sym e
 
   (CE.Sign _, xe) -> numOp bvSign fpSign xe
-    where bvSign :: BVOp1 sym w
+    where -- Implement `signum x` as `x > 0 ? 1 : (x < 0 ? -1 : x)`.
+          -- This matches how copilot-c99 translates Sign to C code.
+          bvSign :: BVOp1 sym w
           bvSign e = do zero <- WI.bvLit sym knownRepr (BV.zero knownNat)
                         neg_one <- WI.bvLit sym knownNat (BV.mkBV knownNat (-1))
                         pos_one <- WI.bvLit sym knownNat (BV.mkBV knownNat 1)
-                        e_zero <- WI.bvEq sym e zero
                         e_neg <- WI.bvSlt sym e zero
-                        t <- WI.bvIte sym e_neg neg_one pos_one
-                        WI.bvIte sym e_zero zero t
+                        e_pos <- WI.bvSgt sym e zero
+                        t <- WI.bvIte sym e_neg neg_one e
+                        WI.bvIte sym e_pos pos_one t
           fpSign :: forall fi . FPOp1 sym fi
-          fpSign fiRepr  e = do zero <- WFP.iFloatPZero sym fiRepr
+          fpSign fiRepr  e = do zero    <- fpLit fiRepr   0.0
                                 neg_one <- fpLit fiRepr (-1.0)
                                 pos_one <- fpLit fiRepr   1.0
-                                e_zero <- WFP.iFloatEq @_ @fi sym e zero
                                 e_neg <- WFP.iFloatLt @_ @fi sym e zero
-                                t <- WFP.iFloatIte @_ @fi sym e_neg neg_one pos_one
-                                WFP.iFloatIte @_ @fi sym e_zero zero t
+                                e_pos <- WFP.iFloatGt @_ @fi sym e zero
+                                t <- WFP.iFloatIte @_ @fi sym e_neg neg_one e
+                                WFP.iFloatIte @_ @fi sym e_pos pos_one t
   (CE.Recip _, xe) -> fpOp recip xe
     where recip :: forall fi . FPOp1 sym fi
           recip fiRepr e = do one <- fpLit fiRepr 1.0

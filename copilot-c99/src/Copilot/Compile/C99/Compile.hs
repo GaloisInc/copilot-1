@@ -151,7 +151,16 @@ compileh cSettings spec = C.TransUnit declns [] where
     extfundecln (Trigger name _ args) = C.FunDecln Nothing cty name params where
         cty    = C.TypeSpec C.Void
         params = map mkparam $ zip (argnames name) args
-        mkparam (name, UExpr ty _) = C.Param (transtype ty) name
+        mkparam (name, UExpr ty _) = C.Param (mkparamty ty) name
+
+        -- We include a special case for Struct, since we need to add a
+        -- pointer type to ensure that struct arguments are passed by
+        -- reference. Arrays are also passed by reference, but that is done
+        -- automatically by using C's array types, so no special case is needed
+        -- for Array.
+        mkparamty ty = case ty of
+          Struct _ -> C.Const (C.Ptr (transtype ty))
+          _        -> transtype ty
 
   -- Declaration for the step function.
   stepdecln :: C.Decln

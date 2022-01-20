@@ -180,6 +180,7 @@ data BisimulationProofBundle sym =
   , externalInputs     :: [(CE.Name, Some CT.Type, XExpr sym)]
   , triggerState       :: [(CE.Name, WI.Pred sym, [(Some CT.Type, XExpr sym)])]
   , assumptions        :: [WI.Pred sym]
+  , sideConds          :: [WI.Pred sym]
   }
 
 
@@ -197,6 +198,7 @@ computeBisimulationProofBundle sym properties spec =
           triggers  <- computeTriggerState sym spec
           assms     <- computeAssumptions sym properties spec
           externs   <- computeExternalInputs sym
+          sideCnds  <- gets sidePreds
           return
             BisimulationProofBundle
             { initialStreamState = iss
@@ -205,6 +207,7 @@ computeBisimulationProofBundle sym properties spec =
             , externalInputs  = externs
             , triggerState    = triggers
             , assumptions     = assms
+            , sideConds       = sideCnds
             }
 
 

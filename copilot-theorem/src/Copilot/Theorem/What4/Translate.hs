@@ -136,16 +136,26 @@ data TransState sym = TransState {
   streamValues :: Map.Map (CE.Id, StreamOffset) (XExpr sym),
 
   -- | A cache to look up stream definitions by their Id.
-  streams :: Map.Map CE.Id CS.Stream
+  streams :: Map.Map CE.Id CS.Stream,
+
+  -- | A list of side conditions that must be true in order for all
+  --   applications of partial functions (e.g., 'Div') to be well defined.
+  sidePreds :: [WI.Pred sym]
   }
 
 newtype TransM sym a = TransM { unTransM :: StateT (TransState sym) IO a }
   deriving ( Functor
            , Applicative
            , Monad
+           , MonadFail
            , MonadIO
            , MonadState (TransState sym)
            )
+
+-- | Add a side condition originating from an application of a partial
+-- function.
+addSidePred :: WI.Pred sym -> TransM sym ()
+addSidePred newPred = modify $ \st -> st{ sidePreds = newPred : sidePreds st }
 
 data CopilotWhat4 = CopilotWhat4
 
@@ -171,6 +181,7 @@ runTransM spec m =
               , externVars = mempty
               , streamValues = mempty
               , streams = streamMap
+              , sidePreds = []
               }
 
      (res, _) <- runStateT (unTransM m) st
@@ -292,6 +303,7 @@ data SomeBVExpr sym where
 -- | The sign of a bitvector -- this indicates whether it is to be interpreted
 -- as a signed 'Int' or an unsigned 'Word'.
 data BVSign = Signed | Unsigned
+  deriving Eq
 
 -- | If the inner expression can be viewed as a bitvector, we project out a view
 -- of it as such.
@@ -306,6 +318,39 @@ asBVExpr xe = case xe of
   XWord32 e -> Just (SomeBVExpr e knownNat Unsigned XWord32)
   XWord64 e -> Just (SomeBVExpr e knownNat Unsigned XWord64)
   _ -> Nothing
+
+-- | If an 'XExpr' is a bitvector expression, use it to generate a side
+-- condition involving an application of a partial function.
+-- Otherwise, do nothing.
+addBVSidePred1 ::
+  WI.IsExprBuilder sym =>
+  XExpr sym ->
+  (forall w. 1 <= w => WI.SymBV sym w -> NatRepr w -> BVSign -> IO (WI.Pred sym)) ->
+  TransM sym ()
+addBVSidePred1 xe makeSidePred =
+  case asBVExpr xe of
+    Just (SomeBVExpr e w sgn _) -> do
+      sidePred <- liftIO $ makeSidePred e w sgn
+      addSidePred sidePred
+    Nothing -> pure ()
+
+-- | If two 'XExpr's are both bitvector expressions of the same type, use them
+-- to generate a side condition involving an application of a partial function.
+-- Otherwise, do nothing.
+addBVSidePred2 ::
+  WI.IsExprBuilder sym =>
+  XExpr sym ->
+  XExpr sym ->
+  (forall w. 1 <= w => WI.SymBV sym w -> WI.SymBV sym w -> NatRepr w -> BVSign -> IO (WI.Pred sym)) ->
+  TransM sym ()
+addBVSidePred2 xe1 xe2 makeSidePred =
+  case (asBVExpr xe1, asBVExpr xe2) of
+    (Just (SomeBVExpr e1 w1 sgn1 _), Just (SomeBVExpr e2 w2 sgn2 _))
+      |  Just Refl <- testEquality w1 w2
+      ,  sgn1 == sgn2
+      -> do sidePred <- liftIO $ makeSidePred e1 e2 w1 sgn1
+            addSidePred sidePred
+    _ -> pure ()
 
 -- | Translate a constant expression by creating a what4 literal and packaging
 -- it up into an 'XExpr'.
@@ -455,16 +500,16 @@ translateExpr sym localEnv e offset = case e of
   CE.ExternVar tp nm _prefix -> getExternConstant sym tp nm offset
   CE.Op1 op e1 ->
     do xe1 <- translateExpr sym localEnv e1 offset
-       liftIO $ translateOp1 e sym op xe1
+       translateOp1 e sym op xe1
   CE.Op2 op e1 e2 ->
     do xe1 <- translateExpr sym localEnv e1 offset
        xe2 <- translateExpr sym localEnv e2 offset
-       liftIO $ translateOp2 e sym op xe1 xe2
+       translateOp2 e sym op xe1 xe2
   CE.Op3 op e1 e2 e3 ->
     do xe1 <- translateExpr sym localEnv e1 offset
        xe2 <- translateExpr sym localEnv e2 offset
        xe3 <- translateExpr sym localEnv e3 offset
-       liftIO $ translateOp3 e sym op xe1 xe2 xe3
+       translateOp3 e sym op xe1 xe2 xe3
   CE.Label _ _ e1 ->
     translateExpr sym localEnv e1 offset
   CE.Local _tpa _tpb nm e1 body ->
@@ -497,11 +542,16 @@ translateOp1 :: forall sym a b.
   sym ->
   CE.Op1 a b ->
   XExpr sym ->
-  IO (XExpr sym)
+  TransM sym (XExpr sym)
 translateOp1 origExpr sym op xe = case (op, xe) of
-  (CE.Not, XBool e) -> XBool <$> WI.notPred sym e
+  (CE.Not, XBool e) -> liftIO $ XBool <$> WI.notPred sym e
   (CE.Not, _) -> panic ["Expected bool", show xe]
-  (CE.Abs _, xe) -> numOp bvAbs fpAbs xe
+  (CE.Abs _, xe) -> do addBVSidePred1 xe $ \e w _ -> do
+                         -- The argument should not be INT_MIN
+                         bvIntMin <- liftIO $ WI.bvLit sym w (BV.minSigned w)
+                         eqIntMin <- liftIO $ WI.bvEq sym e bvIntMin
+                         WI.notPred sym eqIntMin
+                       liftIO $ numOp bvAbs fpAbs xe
     where
       bvAbs :: BVOp1 sym w
       bvAbs e = do zero <- WI.bvLit sym knownNat (BV.zero knownNat)
@@ -510,7 +560,8 @@ translateOp1 origExpr sym op xe = case (op, xe) of
                    WI.bvIte sym e_neg neg_e e
       fpAbs :: forall fi . FPOp1 sym fi
       fpAbs _fiRepr e = WFP.iFloatAbs @_ @fi sym e
-  (CE.Sign _, xe) -> numOp bvSign fpSign xe
+
+  (CE.Sign _, xe) -> liftIO $ numOp bvSign fpSign xe
     where
       -- Implement `signum x` as `x > 0 ? 1 : (x < 0 ? -1 : x)`.
       -- This matches how copilot-c99 translates Sign to C code.
@@ -530,34 +581,55 @@ translateOp1 origExpr sym op xe = case (op, xe) of
                             e_pos <- WFP.iFloatGt @_ @fi sym e zero
                             t <- WFP.iFloatIte @_ @fi sym e_neg neg_one e
                             WFP.iFloatIte @_ @fi sym e_pos pos_one t
-  (CE.Recip _, xe) -> fpOp recip xe
+
+  -- We do not track any side conditions for floating-point operations
+  -- (see Note [Side conditions for floating-point operations]), but we will
+  -- make a note of which operations have partial inputs.
+
+  -- The argument should not be zero
+  (CE.Recip _, xe) -> liftIO $ fpOp recip xe
     where
       recip :: forall fi . FPOp1 sym fi
       recip fiRepr e = do one <- fpLit fiRepr 1.0
                           WFP.iFloatDiv @_ @fi sym fpRM one e
-  (CE.Sqrt _, xe) -> fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatSqrt @_ @fi sym fpRM) xe
-  (CE.Exp _, xe) -> fpSpecialOp WSF.Exp xe
-  (CE.Log _, xe) -> fpSpecialOp WSF.Log xe
-  (CE.Sin _, xe) -> fpSpecialOp WSF.Sin xe
-  (CE.Cos _, xe) -> fpSpecialOp WSF.Cos xe
-  (CE.Tan _, xe) -> fpSpecialOp WSF.Tan xe
-  (CE.Sinh _, xe) -> fpSpecialOp WSF.Sinh xe
-  (CE.Cosh _, xe) -> fpSpecialOp WSF.Cosh xe
-  (CE.Tanh _, xe) -> fpSpecialOp WSF.Tanh xe
-  (CE.Asin _, xe) -> fpSpecialOp WSF.Arcsin xe
-  (CE.Acos _, xe) -> fpSpecialOp WSF.Arccos xe
-  (CE.Atan _, xe) -> fpSpecialOp WSF.Arctan xe
-  (CE.Asinh _, xe) -> fpSpecialOp WSF.Arcsinh xe
-  (CE.Acosh _, xe) -> fpSpecialOp WSF.Arccosh xe
-  (CE.Atanh _, xe) -> fpSpecialOp WSF.Arctanh xe
-  (CE.Ceiling _, xe) -> fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatRound @_ @fi sym WI.RTP) xe
-  (CE.Floor _, xe) -> fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatRound @_ @fi sym WI.RTN) xe
+  -- The argument is should not be less than -0
+  (CE.Sqrt _, xe) -> liftIO $ fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatSqrt @_ @fi sym fpRM) xe
+  -- The argument should not cause the result to overflow or underlow
+  (CE.Exp _, xe) -> liftIO $ fpSpecialOp WSF.Exp xe
+  -- The argument should not be negative or zero
+  (CE.Log _, xe) -> liftIO $ fpSpecialOp WSF.Log xe
+  -- The argument should not be infinite
+  (CE.Sin _, xe) -> liftIO $ fpSpecialOp WSF.Sin xe
+  -- The argument should not be infinite
+  (CE.Cos _, xe) -> liftIO $ fpSpecialOp WSF.Cos xe
+  -- The argument should not be infinite, nor should it cause the result to overflow
+  (CE.Tan _, xe) -> liftIO $ fpSpecialOp WSF.Tan xe
+  -- The argument should not cause the result to overflow
+  (CE.Sinh _, xe) -> liftIO $ fpSpecialOp WSF.Sinh xe
+  -- The argument should not cause the result to overflow
+  (CE.Cosh _, xe) -> liftIO $ fpSpecialOp WSF.Cosh xe
+  (CE.Tanh _, xe) -> liftIO $ fpSpecialOp WSF.Tanh xe
+  -- The argument should not be outside the range [-1, 1]
+  (CE.Asin _, xe) -> liftIO $ fpSpecialOp WSF.Arcsin xe
+  -- The argument should not be outside the range [-1, 1]
+  (CE.Acos _, xe) -> liftIO $ fpSpecialOp WSF.Arccos xe
+  (CE.Atan _, xe) -> liftIO $ fpSpecialOp WSF.Arctan xe
+  (CE.Asinh _, xe) -> liftIO $ fpSpecialOp WSF.Arcsinh xe
+  -- The argument should not be less than 1
+  (CE.Acosh _, xe) -> liftIO $ fpSpecialOp WSF.Arccosh xe
+  -- The argument should not be less than or equal to -1,
+  -- nor should it be greater than or equal to +1
+  (CE.Atanh _, xe) -> liftIO $ fpSpecialOp WSF.Arctanh xe
+  -- The argument should not cause the result to overflow
+  (CE.Ceiling _, xe) -> liftIO $ fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatRound @_ @fi sym WI.RTP) xe
+  -- The argument should not cause the result to overflow
+  (CE.Floor _, xe) -> liftIO $ fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatRound @_ @fi sym WI.RTN) xe
 
-  (CE.BwNot _, xe) -> case xe of
+  (CE.BwNot _, xe) -> liftIO $ case xe of
     XBool e -> XBool <$> WI.notPred sym e
     _ -> bvOp (WI.bvNotBits sym) xe
 
-  (CE.Cast _ tp, _) -> castOp origExpr sym tp xe
+  (CE.Cast _ tp, _) -> liftIO $ castOp origExpr sym tp xe
   (CE.GetField (CT.Struct s) _ftp extractor, XStruct xes) -> do
     let fieldNameRepr = fieldName (extractor undefined)
     let structFieldNameReprs = valueName <$> CT.toValues s
@@ -616,7 +688,7 @@ translateOp1 origExpr sym op xe = case (op, xe) of
         WFP.DoubleFloatRepr -> WFP.iFloatLitDouble sym fracLit
         _ -> panic ["Expected single- or double-precision float", show fiRepr]
 
-    unexpectedValue :: forall x. Panic.HasCallStack => String -> IO x
+    unexpectedValue :: forall m x. (Panic.HasCallStack, MonadIO m) => String -> m x
     unexpectedValue op =
       panic [ "Unexpected value in " ++ op ++ ": " ++ show (CP.ppExpr origExpr)
             , show xe ]
@@ -647,27 +719,77 @@ translateOp2 :: forall sym a b c.
    CE.Op2 a b c ->
    XExpr sym ->
    XExpr sym ->
-   IO (XExpr sym)
+   TransM sym (XExpr sym)
 translateOp2 origExpr sym op xe1 xe2 = case (op, xe1, xe2) of
-  (CE.And, XBool e1, XBool e2) -> XBool <$> WI.andPred sym e1 e2
-  (CE.Or, XBool e1, XBool e2) -> XBool <$> WI.orPred sym e1 e2
+  (CE.And, XBool e1, XBool e2) -> liftIO $ XBool <$> WI.andPred sym e1 e2
+  (CE.Or, XBool e1, XBool e2) -> liftIO $ XBool <$> WI.orPred sym e1 e2
   (CE.And, _, _) -> unexpectedValues "and operation"
   (CE.Or, _, _) -> unexpectedValues "or operation"
-  (CE.Add _, xe1, xe2) -> numOp (WI.bvAdd sym)
-                                (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatAdd @_ @fi sym fpRM)
-                                xe1 xe2
-  (CE.Sub _, xe1, xe2) -> numOp (WI.bvSub sym)
-                                (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatSub @_ @fi sym fpRM)
-                                xe1 xe2
-  (CE.Mul _, xe1, xe2) -> numOp (WI.bvMul sym)
-                                (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatMul @_ @fi sym fpRM)
-                                xe1 xe2
-  (CE.Mod _, xe1, xe2) -> bvOp (WI.bvSrem sym) (WI.bvUrem sym) xe1 xe2
-  (CE.Div _, xe1, xe2) -> bvOp (WI.bvSdiv sym) (WI.bvUdiv sym) xe1 xe2
-  (CE.Fdiv _, xe1, xe2) -> fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatDiv @_ @fi sym fpRM)
-                                xe1 xe2
-  (CE.Pow _, xe1, xe2) -> fpSpecialOp WSF.Pow xe1 xe2
-  (CE.Logb _, xe1, xe2) -> fpOp logbFn xe1 xe2
+  (CE.Add _, xe1, xe2) -> do addBVSidePred2 xe1 xe2 $ \e1 e2 _ sgn ->
+                               -- The arguments should not result in
+                               -- signed overflow or underflow
+                               case sgn of
+                                 Signed -> do
+                                   (wrap, _) <- WI.addSignedOF sym e1 e2
+                                   WI.notPred sym wrap
+                                 Unsigned -> pure $ WI.truePred sym
+
+                             liftIO $
+                               numOp (WI.bvAdd sym)
+                                     (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatAdd @_ @fi sym fpRM)
+                                     xe1 xe2
+  (CE.Sub _, xe1, xe2) -> do addBVSidePred2 xe1 xe2 $ \e1 e2 _ sgn ->
+                               -- The arguments should not result in
+                               -- signed overflow or underflow
+                               case sgn of
+                                 Signed -> do
+                                   (wrap, _) <- WI.subSignedOF sym e1 e2
+                                   WI.notPred sym wrap
+                                 Unsigned -> pure $ WI.truePred sym
+
+                             liftIO $
+                               numOp (WI.bvSub sym)
+                                     (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatSub @_ @fi sym fpRM)
+                                     xe1 xe2
+  (CE.Mul _, xe1, xe2) -> do addBVSidePred2 xe1 xe2 $ \e1 e2 _ sgn ->
+                               -- The arguments should not result in
+                               -- signed overflow or underflow
+                               case sgn of
+                                 Signed -> do
+                                   (wrap, _) <- WI.mulSignedOF sym e1 e2
+                                   WI.notPred sym wrap
+                                 Unsigned -> pure $ WI.truePred sym
+
+                             liftIO $
+                               numOp (WI.bvMul sym)
+                                     (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatMul @_ @fi sym fpRM)
+                                     xe1 xe2
+  (CE.Mod _, xe1, xe2) -> do -- The second argument should not be zero
+                             addBVSidePred1 xe2 $ \e2 _ _ -> WI.bvIsNonzero sym e2
+                             liftIO $ bvOp (WI.bvSrem sym) (WI.bvUrem sym) xe1 xe2
+  (CE.Div _, xe1, xe2) -> do -- The second argument should not be zero
+                             addBVSidePred1 xe2 $ \e2 _ _ -> WI.bvIsNonzero sym e2
+                             liftIO $ bvOp (WI.bvSdiv sym) (WI.bvUdiv sym) xe1 xe2
+
+  -- We do not track any side conditions for floating-point operations
+  -- (see Note [Side conditions for floating-point operations]), but we will
+  -- make a note of which operations have partial inputs.
+
+  -- The second argument should not be zero
+  (CE.Fdiv _, xe1, xe2) -> liftIO $ fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatDiv @_ @fi sym fpRM)
+                                         xe1 xe2
+  -- None of the following should happen:
+  --
+  -- * The first argument is negative, and the second argument is a finite noninteger
+  --
+  -- * The first argument is zero, and the second argument is negative
+  --
+  -- * The arguments cause the result to overflow
+  --
+  -- * The arguments cause the result to underflow
+  (CE.Pow _, xe1, xe2) -> liftIO $ fpSpecialOp WSF.Pow xe1 xe2
+  -- The second argument should not be negative or zero
+  (CE.Logb _, xe1, xe2) -> liftIO $ fpOp logbFn xe1 xe2
     where
       logbFn :: forall fi . FPOp2 sym fi
       -- Implement logb(e1,e2) as log(e2)/log(e1). This matches how copilot-c99
@@ -675,12 +797,13 @@ translateOp2 origExpr sym op xe1 xe2 = case (op, xe1, xe2) of
       logbFn fiRepr e1 e2 = do re1 <- WFP.iFloatSpecialFunction1 sym fiRepr WSF.Log e1
                                re2 <- WFP.iFloatSpecialFunction1 sym fiRepr WSF.Log e2
                                WFP.iFloatDiv @_ @fi sym fpRM re2 re1
-  (CE.Atan2 _, xe1, xe2) -> fpSpecialOp WSF.Arctan2 xe1 xe2
-  (CE.Eq _, xe1, xe2) -> cmp (WI.eqPred sym) (WI.bvEq sym)
+  (CE.Atan2 _, xe1, xe2) -> liftIO $ fpSpecialOp WSF.Arctan2 xe1 xe2
+  (CE.Eq _, xe1, xe2) -> liftIO $
+                         cmp (WI.eqPred sym) (WI.bvEq sym)
                              (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatEq @_ @fi sym)
                              xe1 xe2
  -- TODO, I think we can simplify this and pull the `not` outside
-  (CE.Ne _, xe1, xe2) -> cmp neqPred bvNeq fpNeq xe1 xe2
+  (CE.Ne _, xe1, xe2) -> liftIO $ cmp neqPred bvNeq fpNeq xe1 xe2
     where
       neqPred :: BoolCmp2 sym
       neqPred e1 e2 = do e <- WI.eqPred sym e1 e2
@@ -691,42 +814,73 @@ translateOp2 origExpr sym op xe1 xe2 = case (op, xe1, xe2) of
       fpNeq :: forall fi . FPCmp2 sym fi
       fpNeq _ e1 e2 = do e <- WFP.iFloatEq @_ @fi sym e1 e2
                          WI.notPred sym e
-  (CE.Le _, xe1, xe2) -> numCmp (WI.bvSle sym) (WI.bvUle sym)
+  (CE.Le _, xe1, xe2) -> liftIO $
+                         numCmp (WI.bvSle sym) (WI.bvUle sym)
                                 (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatLe @_ @fi sym)
                                 xe1 xe2
-  (CE.Ge _, xe1, xe2) -> numCmp (WI.bvSge sym) (WI.bvUge sym)
+  (CE.Ge _, xe1, xe2) -> liftIO $
+                         numCmp (WI.bvSge sym) (WI.bvUge sym)
                                 (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatGe @_ @fi sym)
                                 xe1 xe2
-  (CE.Lt _, xe1, xe2) -> numCmp (WI.bvSlt sym) (WI.bvUlt sym)
+  (CE.Lt _, xe1, xe2) -> liftIO $
+                         numCmp (WI.bvSlt sym) (WI.bvUlt sym)
                                 (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatLt @_ @fi sym)
                                 xe1 xe2
-  (CE.Gt _, xe1, xe2) -> numCmp (WI.bvSgt sym) (WI.bvUgt sym)
+  (CE.Gt _, xe1, xe2) -> liftIO $
+                         numCmp (WI.bvSgt sym) (WI.bvUgt sym)
                                 (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatGt @_ @fi sym)
                                 xe1 xe2
 
-  (CE.BwAnd _, xe1, xe2) -> bvOp (WI.bvAndBits sym) (WI.bvAndBits sym) xe1 xe2
-  (CE.BwOr  _, xe1, xe2) -> bvOp (WI.bvOrBits sym)  (WI.bvOrBits sym)  xe1 xe2
-  (CE.BwXor _, xe1, xe2) -> bvOp (WI.bvXorBits sym) (WI.bvXorBits sym) xe1 xe2
+  (CE.BwAnd _, xe1, xe2) -> liftIO $ bvOp (WI.bvAndBits sym) (WI.bvAndBits sym) xe1 xe2
+  (CE.BwOr  _, xe1, xe2) -> liftIO $ bvOp (WI.bvOrBits sym)  (WI.bvOrBits sym)  xe1 xe2
+  (CE.BwXor _, xe1, xe2) -> liftIO $ bvOp (WI.bvXorBits sym) (WI.bvXorBits sym) xe1 xe2
 
   -- Note: For both shift operators, we are interpreting the shifter as an
   -- unsigned bitvector regardless of whether it is a word or an int.
   -- TODO, does this match the intended semantics?
   (CE.BwShiftL _ _, xe1, xe2) -> do
-    Just (SomeBVExpr e1 w1 _ ctor1) <- return $ asBVExpr xe1
-    Just (SomeBVExpr e2 w2 _ _    ) <- return $ asBVExpr xe2
-    e2' <- case testNatCases w1 w2 of
-      NatCaseLT LeqProof -> WI.bvTrunc sym w1 e2
-      NatCaseEQ -> return e2
-      NatCaseGT LeqProof -> WI.bvZext sym w1 e2
-    ctor1 <$> WI.bvShl sym e1 e2'
+    Just (SomeBVExpr e1 w1 sgn1 ctor1) <- return $ asBVExpr xe1
+    Just (SomeBVExpr e2 w2 _    _    ) <- return $ asBVExpr xe2
+
+    e2' <- liftIO $ case testNatCases w1 w2 of
+        NatCaseLT LeqProof -> WI.bvTrunc sym w1 e2
+        NatCaseEQ -> return e2
+        NatCaseGT LeqProof -> WI.bvZext sym w1 e2
+    res <- liftIO $ WI.bvShl sym e1 e2'
+
+    -- The second argument should not be greater than or equal to the bit width
+    wBV <- liftIO $ WI.bvLit sym w1 $ BV.width w1
+    notTooLarge <- liftIO $ WI.bvUlt sym e2' wBV
+    addSidePred notTooLarge
+
+    case sgn1 of
+      Unsigned -> do
+        -- Non-zero bits should not be shifted out
+        otherDirection <- liftIO $ WI.bvLshr sym res e2'
+        noWrap <- liftIO $ WI.bvEq sym e1 otherDirection
+        addSidePred noWrap
+      Signed -> do
+        -- Bits that disagree with the sign bit should not be shifted out
+        otherDirection <- liftIO $ WI.bvAshr sym res e2'
+        noWrap <- liftIO $ WI.bvEq sym e1 otherDirection
+        addSidePred noWrap
+
+    return $ ctor1 res
   (CE.BwShiftR _ _, xe1, xe2) -> do
     Just (SomeBVExpr e1 w1 sgn1 ctor1) <- return $ asBVExpr xe1
     Just (SomeBVExpr e2 w2 _    _    ) <- return $ asBVExpr xe2
-    e2' <- case testNatCases w1 w2 of
+
+    e2' <- liftIO $ case testNatCases w1 w2 of
       NatCaseLT LeqProof -> WI.bvTrunc sym w1 e2
       NatCaseEQ -> return e2
       NatCaseGT LeqProof -> WI.bvZext sym w1 e2
-    ctor1 <$> case sgn1 of
+
+    -- The second argument should not be greater than or equal to the bit width
+    wBV <- liftIO $ WI.bvLit sym w1 $ BV.width w1
+    notTooLarge <- liftIO $ WI.bvUlt sym e2' wBV
+    addSidePred notTooLarge
+
+    liftIO $ fmap ctor1 $ case sgn1 of
       Signed -> WI.bvAshr sym e1 e2'
       Unsigned -> WI.bvLshr sym e1 e2'
 
@@ -739,7 +893,15 @@ translateOp2 origExpr sym op xe1 xe2 = case (op, xe1, xe2) of
   -- true.
   (CE.Index _, xe1, xe2) -> do
     case (xe1, xe2) of
-      (XArray xes, XWord32 ix) -> buildIndexExpr sym ix xes
+      (XArray xes, XWord32 ix) -> do
+        -- The second argument should not be out of bounds (i.e., greater than
+        -- or equal to the length of the array)
+        xesLenBV <- liftIO $ WI.bvLit sym knownNat $ BV.mkBV knownNat
+                           $ toInteger $ V.lengthInt xes
+        inRange <- liftIO $ WI.bvUlt sym ix xesLenBV
+        addSidePred inRange
+
+        liftIO $ buildIndexExpr sym ix xes
       _ -> unexpectedValues "index operation"
 
   where
@@ -829,7 +991,7 @@ translateOp2 origExpr sym op xe1 xe2 = case (op, xe1, xe2) of
       (XDouble e1, XDouble e2)-> XBool <$> fpOp WFP.DoubleFloatRepr e1 e2
       _ -> unexpectedValues "numCmp"
 
-    unexpectedValues :: forall x. Panic.HasCallStack => String -> IO x
+    unexpectedValues :: forall m x. (Panic.HasCallStack, MonadIO m) => String -> m x
     unexpectedValues op =
       panic [ "Unexpected values in " ++ op ++ ": " ++ show (CP.ppExpr origExpr)
             , show xe1, show xe2 ]
@@ -842,16 +1004,29 @@ translateOp3 :: forall sym a b c d .
   XExpr sym ->
   XExpr sym ->
   XExpr sym ->
-  IO (XExpr sym)
+  TransM sym (XExpr sym)
 translateOp3 origExpr sym op xe1 xe2 xe3 = case (op, xe1, xe2, xe3) of
-  (CE.Mux _, XBool te, xe1, xe2) -> mkIte sym te xe1 xe2
+  (CE.Mux _, XBool te, xe1, xe2) -> liftIO $ mkIte sym te xe1 xe2
   (CE.Mux _, _, _, _) -> unexpectedValues "mux operation"
 
-  where unexpectedValues :: forall x. Panic.HasCallStack => String -> IO x
-        unexpectedValues op =
-          panic [ "Unexpected values in " ++ op ++ ":"
-                , show (CP.ppExpr origExpr), show xe1, show xe2, show xe3
-                ]
+  where
+    unexpectedValues :: forall m x. (Panic.HasCallStack, MonadIO m) => String -> m x
+    unexpectedValues op =
+      panic [ "Unexpected values in " ++ op ++ ":"
+            , show (CP.ppExpr origExpr), show xe1, show xe2, show xe3
+            ]
+
+{-
+Note [Side conditions for floating-point operations]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We do not currently track side conditions for floating-point operations for two
+reasons, as they are unlikely to matter. A typical client of copilot-theorem
+will likely treat floating-point operations as uninterpreted functions, and
+side conditions involving uninterpreted functions are very unlikely to be
+helpful except in very specific circumstances. In case we revisit this decision
+later, we make a note of which floating-point operations could potentially
+track side conditions as comments (but without implementing them).
+-}
 
 -- | Build a mux tree for array indexing.
 --   TODO, add special case for concrete index value.

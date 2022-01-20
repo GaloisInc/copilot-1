@@ -137,16 +137,24 @@ data TransState sym = TransState {
   streamValues :: Map.Map (CE.Id, StreamOffset) (XExpr sym),
 
   -- | A cache to look up stream definitions by their Id.
-  streams :: Map.Map CE.Id CS.Stream
+  streams :: Map.Map CE.Id CS.Stream,
+
+  -- | TODO RGS: Docs
+  sidePreds :: [WI.Pred sym]
   }
 
 newtype TransM sym a = TransM { unTransM :: StateT (TransState sym) IO a }
   deriving ( Functor
            , Applicative
            , Monad
+           , MonadFail
            , MonadIO
            , MonadState (TransState sym)
            )
+
+-- | TODO RGS: Docs
+addSidePred :: WI.Pred sym -> TransM sym ()
+addSidePred newPred = modify $ \st -> st{ sidePreds = newPred : sidePreds st }
 
 data CopilotWhat4 = CopilotWhat4
 
@@ -172,6 +180,7 @@ runTransM spec m =
               , externVars = mempty
               , streamValues = mempty
               , streams = streamMap
+              , sidePreds = []
               }
 
      (res, _) <- runStateT (unTransM m) st
@@ -455,16 +464,16 @@ translateExpr sym localEnv e offset = case e of
   CE.ExternVar tp nm _prefix -> getExternConstant sym tp nm offset
   CE.Op1 op e1 ->
     do xe1 <- translateExpr sym localEnv e1 offset
-       liftIO $ translateOp1 e sym op xe1
+       translateOp1 e sym op xe1
   CE.Op2 op e1 e2 ->
     do xe1 <- translateExpr sym localEnv e1 offset
        xe2 <- translateExpr sym localEnv e2 offset
-       liftIO $ translateOp2 e sym op xe1 xe2
+       translateOp2 e sym op xe1 xe2
   CE.Op3 op e1 e2 e3 ->
     do xe1 <- translateExpr sym localEnv e1 offset
        xe2 <- translateExpr sym localEnv e2 offset
        xe3 <- translateExpr sym localEnv e3 offset
-       liftIO $ translateOp3 e sym op xe1 xe2 xe3
+       translateOp3 e sym op xe1 xe2 xe3
   CE.Label _ _ e1 ->
     translateExpr sym localEnv e1 offset
   CE.Local _tpa _tpb nm e1 body ->
@@ -497,11 +506,11 @@ translateOp1 :: forall sym a b.
   sym ->
   CE.Op1 a b ->
   XExpr sym ->
-  IO (XExpr sym)
+  TransM sym (XExpr sym)
 translateOp1 origExpr sym op xe = case (op, xe) of
-  (CE.Not, XBool e) -> XBool <$> WI.notPred sym e
+  (CE.Not, XBool e) -> liftIO $ XBool <$> WI.notPred sym e
   (CE.Not, _) -> panic ["Expected bool", show xe]
-  (CE.Abs _, xe) -> numOp bvAbs fpAbs xe
+  (CE.Abs _, xe) -> liftIO $ numOp bvAbs fpAbs xe
     where bvAbs :: BVOp1 sym w
           bvAbs e = do zero <- WI.bvLit sym knownNat (BV.zero knownNat)
                        e_neg <- WI.bvSlt sym e zero
@@ -510,7 +519,7 @@ translateOp1 origExpr sym op xe = case (op, xe) of
           fpAbs :: forall fi . FPOp1 sym fi
           fpAbs _fiRepr e = WFP.iFloatAbs @_ @fi sym e
 
-  (CE.Sign _, xe) -> numOp bvSign fpSign xe
+  (CE.Sign _, xe) -> liftIO $ numOp bvSign fpSign xe
     where -- Implement `signum x` as `x > 0 ? 1 : (x < 0 ? -1 : x)`.
           -- This matches how copilot-c99 translates Sign to C code.
           bvSign :: BVOp1 sym w
@@ -529,33 +538,33 @@ translateOp1 origExpr sym op xe = case (op, xe) of
                                 e_pos <- WFP.iFloatGt @_ @fi sym e zero
                                 t <- WFP.iFloatIte @_ @fi sym e_neg neg_one e
                                 WFP.iFloatIte @_ @fi sym e_pos pos_one t
-  (CE.Recip _, xe) -> fpOp recip xe
+  (CE.Recip _, xe) -> liftIO $ fpOp recip xe
     where recip :: forall fi . FPOp1 sym fi
           recip fiRepr e = do one <- fpLit fiRepr 1.0
                               WFP.iFloatDiv @_ @fi sym fpRM one e
-  (CE.Sqrt _, xe) -> fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatSqrt @_ @fi sym fpRM) xe
-  (CE.Exp _, xe) -> fpSpecialOp WSF.Exp xe
-  (CE.Log _, xe) -> fpSpecialOp WSF.Log xe
-  (CE.Sin _, xe) -> fpSpecialOp WSF.Sin xe
-  (CE.Cos _, xe) -> fpSpecialOp WSF.Cos xe
-  (CE.Tan _, xe) -> fpSpecialOp WSF.Tan xe
-  (CE.Sinh _, xe) -> fpSpecialOp WSF.Sinh xe
-  (CE.Cosh _, xe) -> fpSpecialOp WSF.Cosh xe
-  (CE.Tanh _, xe) -> fpSpecialOp WSF.Tanh xe
-  (CE.Asin _, xe) -> fpSpecialOp WSF.Arcsin xe
-  (CE.Acos _, xe) -> fpSpecialOp WSF.Arccos xe
-  (CE.Atan _, xe) -> fpSpecialOp WSF.Arctan xe
-  (CE.Asinh _, xe) -> fpSpecialOp WSF.Arcsinh xe
-  (CE.Acosh _, xe) -> fpSpecialOp WSF.Arccosh xe
-  (CE.Atanh _, xe) -> fpSpecialOp WSF.Arctanh xe
-  (CE.Ceiling _, xe) -> fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatRound @_ @fi sym WI.RTP) xe
-  (CE.Floor _, xe) -> fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatRound @_ @fi sym WI.RTN) xe
+  (CE.Sqrt _, xe) -> liftIO $ fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatSqrt @_ @fi sym fpRM) xe
+  (CE.Exp _, xe) -> liftIO $ fpSpecialOp WSF.Exp xe
+  (CE.Log _, xe) -> liftIO $ fpSpecialOp WSF.Log xe
+  (CE.Sin _, xe) -> liftIO $ fpSpecialOp WSF.Sin xe
+  (CE.Cos _, xe) -> liftIO $ fpSpecialOp WSF.Cos xe
+  (CE.Tan _, xe) -> liftIO $ fpSpecialOp WSF.Tan xe
+  (CE.Sinh _, xe) -> liftIO $ fpSpecialOp WSF.Sinh xe
+  (CE.Cosh _, xe) -> liftIO $ fpSpecialOp WSF.Cosh xe
+  (CE.Tanh _, xe) -> liftIO $ fpSpecialOp WSF.Tanh xe
+  (CE.Asin _, xe) -> liftIO $ fpSpecialOp WSF.Arcsin xe
+  (CE.Acos _, xe) -> liftIO $ fpSpecialOp WSF.Arccos xe
+  (CE.Atan _, xe) -> liftIO $ fpSpecialOp WSF.Arctan xe
+  (CE.Asinh _, xe) -> liftIO $ fpSpecialOp WSF.Arcsinh xe
+  (CE.Acosh _, xe) -> liftIO $ fpSpecialOp WSF.Arccosh xe
+  (CE.Atanh _, xe) -> liftIO $ fpSpecialOp WSF.Arctanh xe
+  (CE.Ceiling _, xe) -> liftIO $ fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatRound @_ @fi sym WI.RTP) xe
+  (CE.Floor _, xe) -> liftIO $ fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatRound @_ @fi sym WI.RTN) xe
 
-  (CE.BwNot _, xe) -> case xe of
+  (CE.BwNot _, xe) -> liftIO $ case xe of
     XBool e -> XBool <$> WI.notPred sym e
     _ -> bvOp (WI.bvNotBits sym) xe
 
-  (CE.Cast _ tp, _) -> castOp origExpr sym tp xe
+  (CE.Cast _ tp, _) -> liftIO $ castOp origExpr sym tp xe
   (CE.GetField (CT.Struct s) _ftp extractor, XStruct xes) -> do
     let fieldNameRepr = fieldName (extractor undefined)
     let structFieldNameReprs = valueName <$> CT.toValues s
@@ -614,7 +623,7 @@ translateOp1 origExpr sym op xe = case (op, xe) of
             WFP.DoubleFloatRepr -> WFP.iFloatLitDouble sym fracLit
             _ -> panic ["Expected single- or double-precision float", show fiRepr]
 
-        unexpectedValue :: forall x. Panic.HasCallStack => String -> IO x
+        unexpectedValue :: forall m x. (Panic.HasCallStack, MonadIO m) => String -> m x
         unexpectedValue op =
           panic [ "Unexpected value in " ++ op ++ ": " ++ show (CP.ppExpr origExpr)
                 , show xe ]
@@ -645,39 +654,50 @@ translateOp2 :: forall sym a b c.
    CE.Op2 a b c ->
    XExpr sym ->
    XExpr sym ->
-   IO (XExpr sym)
+   TransM sym (XExpr sym)
 translateOp2 origExpr sym op xe1 xe2 = case (op, xe1, xe2) of
-  (CE.And, XBool e1, XBool e2) -> XBool <$> WI.andPred sym e1 e2
-  (CE.Or, XBool e1, XBool e2) -> XBool <$> WI.orPred sym e1 e2
+  (CE.And, XBool e1, XBool e2) -> liftIO $ XBool <$> WI.andPred sym e1 e2
+  (CE.Or, XBool e1, XBool e2) -> liftIO $ XBool <$> WI.orPred sym e1 e2
   (CE.And, _, _) -> unexpectedValues "and operation"
   (CE.Or, _, _) -> unexpectedValues "or operation"
-  (CE.Add _, xe1, xe2) -> numOp (WI.bvAdd sym)
+  (CE.Add _, xe1, xe2) -> liftIO $
+                          numOp (WI.bvAdd sym)
                                 (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatAdd @_ @fi sym fpRM)
                                 xe1 xe2
-  (CE.Sub _, xe1, xe2) -> numOp (WI.bvSub sym)
+  (CE.Sub _, xe1, xe2) -> liftIO $
+                          numOp (WI.bvSub sym)
                                 (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatSub @_ @fi sym fpRM)
                                 xe1 xe2
-  (CE.Mul _, xe1, xe2) -> numOp (WI.bvMul sym)
+  (CE.Mul _, xe1, xe2) -> liftIO $
+                          numOp (WI.bvMul sym)
                                 (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatMul @_ @fi sym fpRM)
                                 xe1 xe2
-  (CE.Mod _, xe1, xe2) -> bvOp (WI.bvSrem sym) (WI.bvUrem sym) xe1 xe2
-  (CE.Div _, xe1, xe2) -> bvOp (WI.bvSdiv sym) (WI.bvUdiv sym) xe1 xe2
-  (CE.Fdiv _, xe1, xe2) -> fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatDiv @_ @fi sym fpRM)
+  (CE.Mod _, xe1, xe2) -> liftIO $
+                          bvOp (WI.bvSrem sym) (WI.bvUrem sym) xe1 xe2
+  (CE.Div _, xe1, xe2) -> do Just (SomeBVExpr e2 w2 _ _) <- return $ asBVExpr xe2
+                             zeroBV  <- liftIO $ WI.bvLit sym w2 (BV.zero w2)
+                             eqZero  <- liftIO $ WI.bvEq sym e2 zeroBV
+                             neqZero <- liftIO $ WI.notPred sym eqZero
+                             addSidePred neqZero
+                             liftIO $ bvOp (WI.bvSdiv sym) (WI.bvUdiv sym) xe1 xe2
+  (CE.Fdiv _, xe1, xe2) -> liftIO $
+                           fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatDiv @_ @fi sym fpRM)
                                 xe1 xe2
-  (CE.Pow _, xe1, xe2) -> fpSpecialOp WSF.Pow xe1 xe2
-  (CE.Logb _, xe1, xe2) -> fpOp logbFn xe1 xe2
+  (CE.Pow _, xe1, xe2) -> liftIO $ fpSpecialOp WSF.Pow xe1 xe2
+  (CE.Logb _, xe1, xe2) -> liftIO $ fpOp logbFn xe1 xe2
     where logbFn :: forall fi . FPOp2 sym fi
           -- Implement logb(e1,e2) as log(e2)/log(e1). This matches how copilot-c99
           -- translates Logb to C code.
           logbFn fiRepr e1 e2 = do re1 <- WFP.iFloatSpecialFunction1 sym fiRepr WSF.Log e1
                                    re2 <- WFP.iFloatSpecialFunction1 sym fiRepr WSF.Log e2
                                    WFP.iFloatDiv @_ @fi sym fpRM re2 re1
-  (CE.Atan2 _, xe1, xe2) -> fpSpecialOp WSF.Arctan2 xe1 xe2
-  (CE.Eq _, xe1, xe2) -> cmp (WI.eqPred sym) (WI.bvEq sym)
+  (CE.Atan2 _, xe1, xe2) -> liftIO $ fpSpecialOp WSF.Arctan2 xe1 xe2
+  (CE.Eq _, xe1, xe2) -> liftIO $
+                         cmp (WI.eqPred sym) (WI.bvEq sym)
                              (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatEq @_ @fi sym)
                              xe1 xe2
  -- TODO, I think we can simplify this and pull the `not` outside
-  (CE.Ne _, xe1, xe2) -> cmp neqPred bvNeq fpNeq xe1 xe2
+  (CE.Ne _, xe1, xe2) -> liftIO $ cmp neqPred bvNeq fpNeq xe1 xe2
     where neqPred :: BoolCmp2 sym
           neqPred e1 e2 = do e <- WI.eqPred sym e1 e2
                              WI.notPred sym e
@@ -687,27 +707,31 @@ translateOp2 origExpr sym op xe1 xe2 = case (op, xe1, xe2) of
           fpNeq :: forall fi . FPCmp2 sym fi
           fpNeq _ e1 e2 = do e <- WFP.iFloatEq @_ @fi sym e1 e2
                              WI.notPred sym e
-  (CE.Le _, xe1, xe2) -> numCmp (WI.bvSle sym) (WI.bvUle sym)
+  (CE.Le _, xe1, xe2) -> liftIO $
+                         numCmp (WI.bvSle sym) (WI.bvUle sym)
                                 (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatLe @_ @fi sym)
                                 xe1 xe2
-  (CE.Ge _, xe1, xe2) -> numCmp (WI.bvSge sym) (WI.bvUge sym)
+  (CE.Ge _, xe1, xe2) -> liftIO $
+                         numCmp (WI.bvSge sym) (WI.bvUge sym)
                                 (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatGe @_ @fi sym)
                                 xe1 xe2
-  (CE.Lt _, xe1, xe2) -> numCmp (WI.bvSlt sym) (WI.bvUlt sym)
+  (CE.Lt _, xe1, xe2) -> liftIO $
+                         numCmp (WI.bvSlt sym) (WI.bvUlt sym)
                                 (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatLt @_ @fi sym)
                                 xe1 xe2
-  (CE.Gt _, xe1, xe2) -> numCmp (WI.bvSgt sym) (WI.bvUgt sym)
+  (CE.Gt _, xe1, xe2) -> liftIO $
+                         numCmp (WI.bvSgt sym) (WI.bvUgt sym)
                                 (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatGt @_ @fi sym)
                                 xe1 xe2
 
-  (CE.BwAnd _, xe1, xe2) -> bvOp (WI.bvAndBits sym) (WI.bvAndBits sym) xe1 xe2
-  (CE.BwOr  _, xe1, xe2) -> bvOp (WI.bvOrBits sym)  (WI.bvOrBits sym)  xe1 xe2
-  (CE.BwXor _, xe1, xe2) -> bvOp (WI.bvXorBits sym) (WI.bvXorBits sym) xe1 xe2
+  (CE.BwAnd _, xe1, xe2) -> liftIO $ bvOp (WI.bvAndBits sym) (WI.bvAndBits sym) xe1 xe2
+  (CE.BwOr  _, xe1, xe2) -> liftIO $ bvOp (WI.bvOrBits sym)  (WI.bvOrBits sym)  xe1 xe2
+  (CE.BwXor _, xe1, xe2) -> liftIO $ bvOp (WI.bvXorBits sym) (WI.bvXorBits sym) xe1 xe2
 
   -- Note: For both shift operators, we are interpreting the shifter as an
   -- unsigned bitvector regardless of whether it is a word or an int.
   -- TODO, does this match the intended semantics?
-  (CE.BwShiftL _ _, xe1, xe2) -> do
+  (CE.BwShiftL _ _, xe1, xe2) -> liftIO $ do
     Just (SomeBVExpr e1 w1 _ ctor1) <- return $ asBVExpr xe1
     Just (SomeBVExpr e2 w2 _ _    ) <- return $ asBVExpr xe2
     e2' <- case testNatCases w1 w2 of
@@ -715,7 +739,7 @@ translateOp2 origExpr sym op xe1 xe2 = case (op, xe1, xe2) of
       NatCaseEQ -> return e2
       NatCaseGT LeqProof -> WI.bvZext sym w1 e2
     ctor1 <$> WI.bvShl sym e1 e2'
-  (CE.BwShiftR _ _, xe1, xe2) -> do
+  (CE.BwShiftR _ _, xe1, xe2) -> liftIO $ do
     Just (SomeBVExpr e1 w1 sgn1 ctor1) <- return $ asBVExpr xe1
     Just (SomeBVExpr e2 w2 _    _    ) <- return $ asBVExpr xe2
     e2' <- case testNatCases w1 w2 of
@@ -733,7 +757,7 @@ translateOp2 origExpr sym op xe1 xe2 = case (op, xe1, xe2) of
   -- by the solver to be out of bounds (for instance, if it is a constant 5 for
   -- an array of 5 elements), then the if-then-else will trivially resolve to
   -- true.
-  (CE.Index _, xe1, xe2) -> do
+  (CE.Index _, xe1, xe2) -> liftIO $ do
     case (xe1, xe2) of
       (XArray xes, XWord32 ix) -> buildIndexExpr sym ix xes
       _ -> unexpectedValues "index operation"
@@ -824,7 +848,7 @@ translateOp2 origExpr sym op xe1 xe2 = case (op, xe1, xe2) of
           (XDouble e1, XDouble e2)-> XBool <$> fpOp WFP.DoubleFloatRepr e1 e2
           _ -> unexpectedValues "numCmp"
 
-        unexpectedValues :: forall x. Panic.HasCallStack => String -> IO x
+        unexpectedValues :: forall m x. (Panic.HasCallStack, MonadIO m) => String -> m x
         unexpectedValues op =
           panic [ "Unexpected values in " ++ op ++ ": " ++ show (CP.ppExpr origExpr)
                 , show xe1, show xe2 ]
@@ -837,12 +861,12 @@ translateOp3 :: forall sym a b c d .
   XExpr sym ->
   XExpr sym ->
   XExpr sym ->
-  IO (XExpr sym)
+  TransM sym (XExpr sym)
 translateOp3 origExpr sym op xe1 xe2 xe3 = case (op, xe1, xe2, xe3) of
-  (CE.Mux _, XBool te, xe1, xe2) -> mkIte sym te xe1 xe2
+  (CE.Mux _, XBool te, xe1, xe2) -> liftIO $ mkIte sym te xe1 xe2
   (CE.Mux _, _, _, _) -> unexpectedValues "mux operation"
 
-  where unexpectedValues :: forall x. Panic.HasCallStack => String -> IO x
+  where unexpectedValues :: forall m x. (Panic.HasCallStack, MonadIO m) => String -> m x
         unexpectedValues op =
           panic [ "Unexpected values in " ++ op ++ ":"
                 , show (CP.ppExpr origExpr), show xe1, show xe2, show xe3

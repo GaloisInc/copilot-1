@@ -365,28 +365,6 @@ addFPSidePred xe makeSidePred = case asFPExpr xe of
     addSidePred sidePred
   Nothing -> panic ["Expected floating-point expression, got:", show xe]
 
--- | Assert that an 'XExpr' is a bitvector or floating-point expression, and if
--- so, use it to generate a side condition involving an application of a
--- partial function. Panic if the expression is neither a bitvector nor a
--- floating-point expression.
---
--- TODO RGS: Do we actually need this?
-addNumSidePred ::
-  WI.IsExprBuilder sym =>
-  XExpr sym ->
-  (forall w. 1 <= w => WI.SymBV sym w -> NatRepr w -> IO (WI.Pred sym)) ->
-  (forall fi. WFP.SymInterpretedFloat sym fi -> WFP.FloatInfoRepr fi -> IO (WI.Pred sym)) ->
-  TransM sym ()
-addNumSidePred xe makeBVSidePred makeFPSidePred
-  | Just (SomeBVExpr e w _ _) <- asBVExpr xe
-  = do sidePred <- liftIO $ makeBVSidePred e w
-       addSidePred sidePred
-  | Just (SomeFPExpr e fi _) <- asFPExpr xe
-  = do sidePred <- liftIO $ makeFPSidePred e fi
-       addSidePred sidePred
-  | otherwise
-  = panic ["Expected bitvector or floating-point expression, got:", show xe]
-
 -- | Translate a constant expression by creating a what4 literal and packaging
 -- it up into an 'XExpr'.
 translateConstExpr :: forall sym a.

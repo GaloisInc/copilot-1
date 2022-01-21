@@ -139,7 +139,8 @@ data TransState sym = TransState {
   -- | A cache to look up stream definitions by their Id.
   streams :: Map.Map CE.Id CS.Stream,
 
-  -- | TODO RGS: Docs
+  -- | A list of side conditions that must be true in order for all
+  --   applications of partial functions (e.g., 'Div') to be well defined.
   sidePreds :: [WI.Pred sym]
   }
 
@@ -152,7 +153,8 @@ newtype TransM sym a = TransM { unTransM :: StateT (TransState sym) IO a }
            , MonadState (TransState sym)
            )
 
--- | TODO RGS: Docs
+-- | Add a side condition originating from an application of a partial
+-- function.
 addSidePred :: WI.Pred sym -> TransM sym ()
 addSidePred newPred = modify $ \st -> st{ sidePreds = newPred : sidePreds st }
 
@@ -298,6 +300,17 @@ data SomeBVExpr sym where
     (WI.SymBV sym w -> XExpr sym) ->
     SomeBVExpr sym
 
+-- | A view of an 'XExpr' as a floating-point expression, its
+-- 'WFP.FloatInfoRepr', and the constructor used to reconstruct an 'XExpr' from
+-- it. This is a useful view for translation, as many of the operations can be
+-- grouped together for all floats.
+data SomeFPExpr sym where
+  SomeFPExpr ::
+    WFP.SymInterpretedFloat sym fi ->
+    WFP.FloatInfoRepr fi ->
+    (WFP.SymInterpretedFloat sym fi -> XExpr sym) ->
+    SomeFPExpr sym
+
 -- | The sign of a bitvector -- this indicates whether it is to be interpreted
 -- as a signed 'Int' or an unsigned 'Word'.
 data BVSign = Signed | Unsigned
@@ -315,6 +328,64 @@ asBVExpr xe = case xe of
   XWord32 e -> Just (SomeBVExpr e knownNat Unsigned XWord32)
   XWord64 e -> Just (SomeBVExpr e knownNat Unsigned XWord64)
   _ -> Nothing
+
+-- | If the inner expression can be viewed as a floating-point expression, we
+-- project out a view of it as such.
+asFPExpr :: XExpr sym -> Maybe (SomeFPExpr sym)
+asFPExpr xe = case xe of
+  XFloat  e -> Just (SomeFPExpr e WFP.SingleFloatRepr XFloat)
+  XDouble e -> Just (SomeFPExpr e WFP.DoubleFloatRepr XDouble)
+  _ -> Nothing
+
+-- | Assert that an 'XExpr' is a bitvector expression, and if so, use it to
+-- generate a side condition involving an application of a partial function.
+-- Panic if the expression is not a bitvector expression.
+addBVSidePred ::
+  WI.IsExprBuilder sym =>
+  XExpr sym ->
+  (forall w. 1 <= w => WI.SymBV sym w -> NatRepr w -> IO (WI.Pred sym)) ->
+  TransM sym ()
+addBVSidePred xe makeSidePred = case asBVExpr xe of
+  Just (SomeBVExpr e w _ _) -> do
+    sidePred <- liftIO $ makeSidePred e w
+    addSidePred sidePred
+  Nothing -> panic ["Expected bitvector expression, got:", show xe]
+
+-- | Assert that an 'XExpr' is a floating-point expression, and if so, use it
+-- to generate a side condition involving an application of a partial function.
+-- Panic if the expression is not a floating-point expression.
+addFPSidePred ::
+  WI.IsExprBuilder sym =>
+  XExpr sym ->
+  (forall fi. WFP.SymInterpretedFloat sym fi -> WFP.FloatInfoRepr fi -> IO (WI.Pred sym)) ->
+  TransM sym ()
+addFPSidePred xe makeSidePred = case asFPExpr xe of
+  Just (SomeFPExpr e fi _) -> do
+    sidePred <- liftIO $ makeSidePred e fi
+    addSidePred sidePred
+  Nothing -> panic ["Expected floating-point expression, got:", show xe]
+
+-- | Assert that an 'XExpr' is a bitvector or floating-point expression, and if
+-- so, use it to generate a side condition involving an application of a
+-- partial function. Panic if the expression is neither a bitvector nor a
+-- floating-point expression.
+--
+-- TODO RGS: Do we actually need this?
+addNumSidePred ::
+  WI.IsExprBuilder sym =>
+  XExpr sym ->
+  (forall w. 1 <= w => WI.SymBV sym w -> NatRepr w -> IO (WI.Pred sym)) ->
+  (forall fi. WFP.SymInterpretedFloat sym fi -> WFP.FloatInfoRepr fi -> IO (WI.Pred sym)) ->
+  TransM sym ()
+addNumSidePred xe makeBVSidePred makeFPSidePred
+  | Just (SomeBVExpr e w _ _) <- asBVExpr xe
+  = do sidePred <- liftIO $ makeBVSidePred e w
+       addSidePred sidePred
+  | Just (SomeFPExpr e fi _) <- asFPExpr xe
+  = do sidePred <- liftIO $ makeFPSidePred e fi
+       addSidePred sidePred
+  | otherwise
+  = panic ["Expected bitvector or floating-point expression, got:", show xe]
 
 -- | Translate a constant expression by creating a what4 literal and packaging
 -- it up into an 'XExpr'.
@@ -510,7 +581,18 @@ translateOp1 :: forall sym a b.
 translateOp1 origExpr sym op xe = case (op, xe) of
   (CE.Not, XBool e) -> liftIO $ XBool <$> WI.notPred sym e
   (CE.Not, _) -> panic ["Expected bool", show xe]
-  (CE.Abs _, xe) -> liftIO $ numOp bvAbs fpAbs xe
+  (CE.Abs _, xe) -> do -- If we are invoking Abs on a bitvector expression, we
+                       -- must assert that the expression is not equal to
+                       -- INT_MIN. For floating-point expressions, we do not
+                       -- need to check anything.
+                       case asBVExpr xe of
+                         Nothing -> return ()
+                         Just (SomeBVExpr e w _ _) -> do
+                           bvIntMin  <- liftIO $ WI.bvLit sym w (BV.minSigned w)
+                           eqIntMin  <- liftIO $ WI.bvEq sym e bvIntMin
+                           neqIntMin <- liftIO $ WI.notPred sym eqIntMin
+                           addSidePred neqIntMin
+                       liftIO $ numOp bvAbs fpAbs xe
     where bvAbs :: BVOp1 sym w
           bvAbs e = do zero <- WI.bvLit sym knownNat (BV.zero knownNat)
                        e_neg <- WI.bvSlt sym e zero
@@ -538,25 +620,65 @@ translateOp1 origExpr sym op xe = case (op, xe) of
                                 e_pos <- WFP.iFloatGt @_ @fi sym e zero
                                 t <- WFP.iFloatIte @_ @fi sym e_neg neg_one e
                                 WFP.iFloatIte @_ @fi sym e_pos pos_one t
-  (CE.Recip _, xe) -> liftIO $ fpOp recip xe
+  (CE.Recip _, xe) -> do addFPSidePred xe $ \e (_ :: WFP.FloatInfoRepr fi) -> do
+                           eqZero <- WFP.iFloatIsZero @_ @fi sym e
+                           WI.notPred sym eqZero
+                         liftIO $ fpOp recip xe
     where recip :: forall fi . FPOp1 sym fi
           recip fiRepr e = do one <- fpLit fiRepr 1.0
                               WFP.iFloatDiv @_ @fi sym fpRM one e
-  (CE.Sqrt _, xe) -> liftIO $ fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatSqrt @_ @fi sym fpRM) xe
+  (CE.Sqrt _, xe) -> do addFPSidePred xe $ \e (fiRepr :: WFP.FloatInfoRepr fi) -> do
+                          nZero <- WFP.iFloatNZero sym fiRepr
+                          ltNZero <- WFP.iFloatLt @_ @fi sym e nZero
+                          WI.notPred sym ltNZero
+                        liftIO $ fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatSqrt @_ @fi sym fpRM) xe
   (CE.Exp _, xe) -> liftIO $ fpSpecialOp WSF.Exp xe
-  (CE.Log _, xe) -> liftIO $ fpSpecialOp WSF.Log xe
-  (CE.Sin _, xe) -> liftIO $ fpSpecialOp WSF.Sin xe
-  (CE.Cos _, xe) -> liftIO $ fpSpecialOp WSF.Cos xe
-  (CE.Tan _, xe) -> liftIO $ fpSpecialOp WSF.Tan xe
+  (CE.Log _, xe) -> do addFPSidePred xe $ \e (_ :: WFP.FloatInfoRepr fi) ->
+                         WFP.iFloatIsPos @_ @fi sym e
+                       liftIO $ fpSpecialOp WSF.Log xe
+  (CE.Sin _, xe) -> do addFPSidePred xe $ \e (_ :: WFP.FloatInfoRepr fi) -> do
+                         inf <- WFP.iFloatIsInf @_ @fi sym e
+                         WI.notPred sym inf
+                       liftIO $ fpSpecialOp WSF.Sin xe
+  (CE.Cos _, xe) -> do addFPSidePred xe $ \e (_ :: WFP.FloatInfoRepr fi) -> do
+                         inf <- WFP.iFloatIsInf @_ @fi sym e
+                         WI.notPred sym inf
+                       liftIO $ fpSpecialOp WSF.Cos xe
+  (CE.Tan _, xe) -> do addFPSidePred xe $ \e (_ :: WFP.FloatInfoRepr fi) -> do
+                         inf <- WFP.iFloatIsInf @_ @fi sym e
+                         WI.notPred sym inf
+                       liftIO $ fpSpecialOp WSF.Tan xe
   (CE.Sinh _, xe) -> liftIO $ fpSpecialOp WSF.Sinh xe
   (CE.Cosh _, xe) -> liftIO $ fpSpecialOp WSF.Cosh xe
   (CE.Tanh _, xe) -> liftIO $ fpSpecialOp WSF.Tanh xe
-  (CE.Asin _, xe) -> liftIO $ fpSpecialOp WSF.Arcsin xe
-  (CE.Acos _, xe) -> liftIO $ fpSpecialOp WSF.Arccos xe
+  (CE.Asin _, xe) -> do addFPSidePred xe $ \e (fiRepr :: WFP.FloatInfoRepr fi) -> do
+                          nOne   <- fpLit fiRepr (-1.0)
+                          pOne   <- fpLit fiRepr   1.0
+                          geNOne <- WFP.iFloatGe @_ @fi sym e nOne
+                          lePOne <- WFP.iFloatLe @_ @fi sym e pOne
+                          WI.andPred sym geNOne lePOne
+                        liftIO $ fpSpecialOp WSF.Arcsin xe
+  (CE.Acos _, xe) -> do addFPSidePred xe $ \e (fiRepr :: WFP.FloatInfoRepr fi) -> do
+                          nOne   <- fpLit fiRepr (-1.0)
+                          pOne   <- fpLit fiRepr   1.0
+                          geNOne <- WFP.iFloatGe @_ @fi sym e nOne
+                          lePOne <- WFP.iFloatLe @_ @fi sym e pOne
+                          WI.andPred sym geNOne lePOne
+                        liftIO $ fpSpecialOp WSF.Arccos xe
   (CE.Atan _, xe) -> liftIO $ fpSpecialOp WSF.Arctan xe
   (CE.Asinh _, xe) -> liftIO $ fpSpecialOp WSF.Arcsinh xe
-  (CE.Acosh _, xe) -> liftIO $ fpSpecialOp WSF.Arccosh xe
-  (CE.Atanh _, xe) -> liftIO $ fpSpecialOp WSF.Arctanh xe
+  (CE.Acosh _, xe) -> do addFPSidePred xe $ \e (fiRepr :: WFP.FloatInfoRepr fi) -> do
+                           one   <- fpLit fiRepr 1.0
+                           ltOne <- WFP.iFloatLt @_ @fi sym e one
+                           WI.notPred sym ltOne
+                         liftIO $ fpSpecialOp WSF.Arccosh xe
+  (CE.Atanh _, xe) -> do addFPSidePred xe $ \e (fiRepr :: WFP.FloatInfoRepr fi) -> do
+                           nOne   <- fpLit fiRepr (-1.0)
+                           pOne   <- fpLit fiRepr   1.0
+                           gtNOne <- WFP.iFloatGt @_ @fi sym e nOne
+                           ltPOne <- WFP.iFloatLt @_ @fi sym e pOne
+                           WI.andPred sym gtNOne ltPOne
+                         liftIO $ fpSpecialOp WSF.Arctanh xe
   (CE.Ceiling _, xe) -> liftIO $ fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatRound @_ @fi sym WI.RTP) xe
   (CE.Floor _, xe) -> liftIO $ fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatRound @_ @fi sym WI.RTN) xe
 
@@ -672,19 +794,33 @@ translateOp2 origExpr sym op xe1 xe2 = case (op, xe1, xe2) of
                           numOp (WI.bvMul sym)
                                 (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatMul @_ @fi sym fpRM)
                                 xe1 xe2
-  (CE.Mod _, xe1, xe2) -> liftIO $
-                          bvOp (WI.bvSrem sym) (WI.bvUrem sym) xe1 xe2
-  (CE.Div _, xe1, xe2) -> do Just (SomeBVExpr e2 w2 _ _) <- return $ asBVExpr xe2
-                             zeroBV  <- liftIO $ WI.bvLit sym w2 (BV.zero w2)
-                             eqZero  <- liftIO $ WI.bvEq sym e2 zeroBV
-                             neqZero <- liftIO $ WI.notPred sym eqZero
-                             addSidePred neqZero
+  (CE.Mod _, xe1, xe2) -> do addBVSidePred xe2 $ \e2 _ -> WI.bvIsNonzero sym e2
+                             liftIO $ bvOp (WI.bvSrem sym) (WI.bvUrem sym) xe1 xe2
+  (CE.Div _, xe1, xe2) -> do addBVSidePred xe2 $ \e2 _ -> WI.bvIsNonzero sym e2
                              liftIO $ bvOp (WI.bvSdiv sym) (WI.bvUdiv sym) xe1 xe2
-  (CE.Fdiv _, xe1, xe2) -> liftIO $
-                           fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatDiv @_ @fi sym fpRM)
-                                xe1 xe2
-  (CE.Pow _, xe1, xe2) -> liftIO $ fpSpecialOp WSF.Pow xe1 xe2
-  (CE.Logb _, xe1, xe2) -> liftIO $ fpOp logbFn xe1 xe2
+  (CE.Fdiv _, xe1, xe2) -> do addFPSidePred xe2 $ \e2 (_ :: WFP.FloatInfoRepr fi2) -> do
+                                eqZero <- WFP.iFloatIsZero @_ @fi2 sym e2
+                                WI.notPred sym eqZero
+                              liftIO $ fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatDiv @_ @fi sym fpRM)
+                                            xe1 xe2
+  (CE.Pow _, xe1, xe2) -> do case (asFPExpr xe1, asFPExpr xe2) of
+                               (Just (SomeFPExpr e1 (_ :: WFP.FloatInfoRepr fi1) _),
+                                Just (SomeFPExpr e2 (_ :: WFP.FloatInfoRepr fi2) _)) -> do
+                                  e1IsZero <- liftIO $ WFP.iFloatIsZero @_ @fi1 sym e1
+                                  e2IsNeg  <- liftIO $ WFP.iFloatIsNeg  @_ @fi2 sym e2
+                                  andPred  <- liftIO $ WI.andPred sym e1IsZero e2IsNeg
+                                  sidePred <- liftIO $ WI.notPred sym andPred
+                                  addSidePred sidePred
+                               _ -> panic [ "Expected two floating-point arguments to Pow, got:"
+                                          , show xe1, show xe2
+                                          ]
+
+                             liftIO $ fpSpecialOp WSF.Pow xe1 xe2
+  (CE.Logb _, xe1, xe2) -> do addFPSidePred xe1 $ \e1 (_ :: WFP.FloatInfoRepr fi1) ->
+                                WFP.iFloatIsPos @_ @fi1 sym e1
+                              addFPSidePred xe2 $ \e2 (_ :: WFP.FloatInfoRepr fi2) ->
+                                WFP.iFloatIsPos @_ @fi2 sym e2
+                              liftIO $ fpOp logbFn xe1 xe2
     where logbFn :: forall fi . FPOp2 sym fi
           -- Implement logb(e1,e2) as log(e2)/log(e1). This matches how copilot-c99
           -- translates Logb to C code.

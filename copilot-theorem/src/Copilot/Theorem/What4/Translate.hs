@@ -59,7 +59,6 @@ import qualified What4.BaseTypes                as WT
 import qualified What4.SpecialFunctions         as WSF
 
 import Control.Monad.State
-import qualified Data.Binary.IEEE754 as IEEE754
 import qualified Data.BitVector.Sized as BV
 import Data.IORef (newIORef, readIORef, modifyIORef)
 import Data.List (elemIndex, genericLength, genericIndex)
@@ -75,6 +74,7 @@ import Data.Word
 import LibBF ( BigFloat
              , bfToDouble
              , pattern NearEven )
+import GHC.Float (castWord32ToFloat, castWord64ToDouble)
 import GHC.TypeNats (KnownNat)
 import qualified Panic as Panic
 
@@ -258,13 +258,13 @@ valFromExpr ge xe = case xe of
       iFloatGroundEval WFP.SingleFloatRepr e
                        (realToFrac . fst . bfToDouble NearEven)
                        fromRational
-                       (IEEE754.wordToFloat . fromInteger . BV.asUnsigned)
+                       (castWord32ToFloat . fromInteger . BV.asUnsigned)
   XDouble e ->
     Some . CopilotValue CT.Double <$>
       iFloatGroundEval WFP.DoubleFloatRepr e
                        (fst . bfToDouble NearEven)
                        fromRational
-                       (IEEE754.wordToDouble . fromInteger . BV.asUnsigned)
+                       (castWord64ToDouble . fromInteger . BV.asUnsigned)
   _ -> error "valFromExpr unhandled case"
   where
     fromBV :: forall a w . Num a => BV.BV w -> a

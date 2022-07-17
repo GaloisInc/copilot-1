@@ -82,6 +82,7 @@ import Data.Parameterized.NatRepr
 import Data.Parameterized.Nonce
 import Data.Parameterized.Some
 import LibBF (bfToDouble, pattern NearEven)
+import qualified Panic as Panic
 
 import           Copilot.Theorem.What4.Translate
 
@@ -173,11 +174,11 @@ prove solver spec = do
   return res
   where
     expectedBool :: forall m sym a.
-                    (MonadFail m, WI.IsExprBuilder sym)
+                    (Panic.HasCallStack, MonadIO m, WI.IsExprBuilder sym)
                  => XExpr sym
                  -> m a
     expectedBool xe =
-      fail $ unlines ["Property expected to have boolean result", show xe]
+      panic ["Property expected to have boolean result", show xe]
 
 data CopilotValue a = CopilotValue { cvType :: CT.Type a
                                    , cvVal :: a

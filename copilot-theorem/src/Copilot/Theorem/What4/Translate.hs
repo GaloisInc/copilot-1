@@ -27,6 +27,8 @@ module Copilot.Theorem.What4.Translate
   , translateExprAt
     -- * What4 representations of Copilot expressions
   , XExpr(..)
+    -- * Auxiliary functions
+  , panic
   ) where
 
 import           Control.Monad                 (forM, zipWithM, (<=<))
@@ -59,6 +61,7 @@ import qualified What4.Interface               as WI
 
 import qualified Copilot.Core.Expr             as CE
 import qualified Copilot.Core.Operators        as CE
+import qualified Copilot.Core.PrettyPrint      as CP
 import qualified Copilot.Core.Spec             as CS
 import qualified Copilot.Core.Type             as CT
 import qualified Copilot.Core.Type.Array       as CT
@@ -145,18 +148,20 @@ translateExpr sym offset e = case e of
   CE.Local _ _ _ _ _ -> error "translateExpr: Local unimplemented"
   CE.Var _ _ -> error "translateExpr: Var unimplemented"
   CE.ExternVar tp nm _prefix -> getExternConstant sym tp nm offset
-  CE.Op1 op e -> liftIO . translateOp1 sym op =<< translateExpr sym offset e
+  CE.Op1 op e1 -> do
+    xe1 <- translateExpr sym offset e1
+    liftIO $ translateOp1 sym e op xe1
   CE.Op2 op e1 e2 -> do
     xe1 <- translateExpr sym offset e1
     xe2 <- translateExpr sym offset e2
     powFn <- gets pow
     logbFn <- gets logb
-    liftIO $ translateOp2 sym powFn logbFn op xe1 xe2
+    liftIO $ translateOp2 sym e powFn logbFn op xe1 xe2
   CE.Op3 op e1 e2 e3 -> do
     xe1 <- translateExpr sym offset e1
     xe2 <- translateExpr sym offset e2
     xe3 <- translateExpr sym offset e3
-    liftIO $ translateOp3 sym op xe1 xe2 xe3
+    liftIO $ translateOp3 sym e op xe1 xe2 xe3
   CE.Label _ _ _ -> error "translateExpr: Label unimplemented"
 
 -- | Translate an expression into a what4 representation at a /specific/
@@ -181,18 +186,20 @@ translateExprAt sym k e =
     CE.Local _ _ _ _ _ -> error "translateExpr: Local unimplemented"
     CE.Var _ _ -> error "translateExpr: Var unimplemented"
     CE.ExternVar tp nm _prefix -> getExternConstantAt sym tp nm k
-    CE.Op1 op e -> liftIO . translateOp1 sym op =<< translateExprAt sym k e
+    CE.Op1 op e1 -> do
+      xe1 <- translateExprAt sym k e1
+      liftIO $ translateOp1 sym e op xe1
     CE.Op2 op e1 e2 -> do
       xe1 <- translateExprAt sym k e1
       xe2 <- translateExprAt sym k e2
       powFn <- gets pow
       logbFn <- gets logb
-      liftIO $ translateOp2 sym powFn logbFn op xe1 xe2
+      liftIO $ translateOp2 sym e powFn logbFn op xe1 xe2
     CE.Op3 op e1 e2 e3 -> do
       xe1 <- translateExprAt sym k e1
       xe2 <- translateExprAt sym k e2
       xe3 <- translateExprAt sym k e3
-      liftIO $ translateOp3 sym op xe1 xe2 xe3
+      liftIO $ translateOp3 sym e op xe1 xe2 xe3
     CE.Label _ _ _ -> error "translateExpr: Label unimplemented"
 
 -- | A view of an XExpr as a bitvector expression, a natrepr for its width, its
@@ -391,12 +398,15 @@ valueName (CT.Value _ f) = Some (fieldName f)
 translateOp1 :: forall sym a b.
                 WI.IsExprBuilder sym
              => sym
+             -> CE.Expr b
+             -- ^ Original value we are translating (only used for error
+             -- messages)
              -> CE.Op1 a b
              -> XExpr sym
              -> IO (XExpr sym)
-translateOp1 sym op xe = case (op, xe) of
+translateOp1 sym origExpr op xe = case (op, xe) of
   (CE.Not, XBool e) -> XBool <$> WI.notPred sym e
-  (CE.Not, _) -> panic
+  (CE.Not, _) -> panic ["Expected bool", show xe]
   (CE.Abs _, xe) -> numOp bvAbs fpAbs xe
     where
       bvAbs :: BVOp1 sym w
@@ -493,16 +503,16 @@ translateOp1 sym op xe = case (op, xe) of
     (XWord32 e, CT.Word32) -> return $ XWord32 e
     (XWord32 e, CT.Word64) -> XWord64 <$> WI.bvZext sym knownNat e
     (XWord64 e, CT.Word64) -> return $ XWord64 e
-    _ -> panic
+    _ -> panic ["Could not compute cast", show (CP.ppExpr origExpr), show xe]
   (CE.GetField (CT.Struct s) _ftp extractor, XStruct xes) ->
     case mIx of
       Just ix -> return $ xes !! ix
-      Nothing -> panic
+      Nothing -> panic ["Could not find field " ++ show fieldNameRepr, show s]
     where
       fieldNameRepr = fieldName (extractor undefined)
       structFieldNameReprs = valueName <$> CT.toValues s
       mIx = elemIndex (Some fieldNameRepr) structFieldNameReprs
-  _ -> panic
+  (CE.GetField{}, _) -> unexpectedValue "get-field operation"
   where
     -- Check the type of the argument. If the argument is a bitvector value,
     -- apply the 'BVOp1'. If the argument is a floating-point value, apply the
@@ -522,7 +532,7 @@ translateOp1 sym op xe = case (op, xe) of
       XWord64 e -> XWord64 <$> bvOp e
       XFloat e -> XFloat <$> fpOp e
       XDouble e -> XDouble <$> fpOp e
-      _ -> panic
+      _ -> unexpectedValue "numOp"
 
     bvOp :: (forall w . BVOp1 sym w) -> XExpr sym -> IO (XExpr sym)
     bvOp f xe = case xe of
@@ -534,13 +544,13 @@ translateOp1 sym op xe = case (op, xe) of
       XWord16 e -> XWord16 <$> f e
       XWord32 e -> XWord32 <$> f e
       XWord64 e -> XWord64 <$> f e
-      _ -> panic
+      _ -> unexpectedValue "bvOp"
 
     fpOp :: (forall fpp . FPOp1 sym fpp) -> XExpr sym -> IO (XExpr sym)
     fpOp g xe = case xe of
       XFloat e -> XFloat <$> g e
       XDouble e -> XDouble <$> g e
-      _ -> panic
+      _ -> unexpectedValue "fpOp"
 
     realOp :: RealOp1 sym -> XExpr sym -> IO (XExpr sym)
     realOp h xe = fpOp hf xe
@@ -555,6 +565,16 @@ translateOp1 sym op xe = case (op, xe) of
     realRecip e = do
       one <- WI.realLit sym 1
       WI.realDiv sym one e
+
+    -- A catch-all error message to use when translation cannot proceed.
+    unexpectedValue :: forall m x.
+                       (Panic.HasCallStack, MonadIO m)
+                    => String
+                    -> m x
+    unexpectedValue op =
+      panic [ "Unexpected value in " ++ op ++ ": " ++ show (CP.ppExpr origExpr)
+            , show xe
+            ]
 
 -- | A binary operation over bitvector values.
 type BVOp2 sym w =
@@ -601,6 +621,9 @@ type FPCmp2 sym fpp =
 translateOp2 :: forall sym a b c.
                 WI.IsSymExprBuilder sym
              => sym
+             -> CE.Expr c
+             -- ^ Original value we are translating (only used for error
+             -- messages)
              -> (WI.SymFn sym
                  (EmptyCtx ::> WT.BaseRealType ::> WT.BaseRealType)
                  WT.BaseRealType)
@@ -613,9 +636,11 @@ translateOp2 :: forall sym a b c.
              -> XExpr sym
              -> XExpr sym
              -> IO (XExpr sym)
-translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
+translateOp2 sym origExpr powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
   (CE.And, XBool e1, XBool e2) -> XBool <$> WI.andPred sym e1 e2
+  (CE.And, _, _) -> unexpectedValues "and operation"
   (CE.Or, XBool e1, XBool e2) -> XBool <$> WI.orPred sym e1 e2
+  (CE.Or, _, _) -> unexpectedValues "or operation"
   (CE.Add _, xe1, xe2) -> numOp (WI.bvAdd sym) (WI.floatAdd sym fpRM) xe1 xe2
   (CE.Sub _, xe1, xe2) -> numOp (WI.bvSub sym) (WI.floatSub sym fpRM) xe1 xe2
   (CE.Mul _, xe1, xe2) -> numOp (WI.bvMul sym) (WI.floatMul sym fpRM) xe1 xe2
@@ -706,8 +731,7 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
   (CE.Index _, xe1, xe2) ->
     case (xe1, xe2) of
       (XArray xes, XWord32 ix) -> buildIndexExpr sym 0 ix xes
-      _ -> panic
-  _ -> panic
+      _ -> unexpectedValues "index operation"
   where
     -- Check the types of the arguments. If the arguments are bitvector values,
     -- apply the 'BVOp2'. If the arguments are floating-point values, apply the
@@ -728,7 +752,7 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
       (XWord64 e1, XWord64 e2) -> XWord64 <$> bvOp e1 e2
       (XFloat e1, XFloat e2) -> XFloat <$> fpOp e1 e2
       (XDouble e1, XDouble e2) -> XDouble <$> fpOp e1 e2
-      _ -> panic
+      _ -> unexpectedValues "numOp"
 
     -- Check the types of the arguments. If the arguments are signed bitvector
     -- values, apply the first 'BVOp2'. If the arguments are unsigned bitvector
@@ -747,7 +771,7 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
       (XWord16 e1, XWord16 e2) -> XWord16 <$> opU e1 e2
       (XWord32 e1, XWord32 e2) -> XWord32 <$> opU e1 e2
       (XWord64 e1, XWord64 e2) -> XWord64 <$> opU e1 e2
-      _ -> panic
+      _ -> unexpectedValues "bvOp"
 
     fpOp :: (forall fpp . FPOp2 sym fpp)
          -> XExpr sym
@@ -756,7 +780,7 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
     fpOp op xe1 xe2 = case (xe1, xe2) of
       (XFloat e1, XFloat e2) -> XFloat <$> op e1 e2
       (XDouble e1, XDouble e2) -> XDouble <$> op e1 e2
-      _ -> panic
+      _ -> unexpectedValues "fpOp"
 
     -- Check the types of the arguments. If the arguments are bitvector values,
     -- apply the 'BVCmp2'. If the arguments are floating-point values, apply the
@@ -779,7 +803,7 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
       (XWord64 e1, XWord64 e2) -> XBool <$> bvOp e1 e2
       (XFloat e1, XFloat e2) -> XBool <$> fpOp e1 e2
       (XDouble e1, XDouble e2) -> XBool <$> fpOp e1 e2
-      _ -> panic
+      _ -> unexpectedValues "cmp"
 
     -- Check the types of the arguments. If the arguments are signed bitvector
     -- values, apply the first 'BVCmp2'. If the arguments are unsigned bitvector
@@ -802,7 +826,7 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
       (XWord64 e1, XWord64 e2) -> XBool <$> bvUOp e1 e2
       (XFloat e1, XFloat e2) -> XBool <$> fpOp e1 e2
       (XDouble e1, XDouble e2) -> XBool <$> fpOp e1 e2
-      _ -> panic
+      _ -> unexpectedValues "numCmp"
 
     -- Construct an expression that indexes into an array by building a chain of
     -- @if@ expressions, where each expression checks if the current index is
@@ -850,20 +874,36 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
           (XArray xes1, XArray xes2) ->
             case V.length xes1 `testEquality` V.length xes2 of
               Just Refl -> XArray <$> V.zipWithM (mkIte sym pred) xes1 xes2
-              Nothing -> panic
-          _ -> panic
+              Nothing -> panic [ "Array length mismatch in ite"
+                               , show (V.length xes1)
+                               , show (V.length xes2)
+                               ]
+          _ -> panic ["Unexpected values in ite", show xe1, show xe2]
+
+    -- A catch-all error message to use when translation cannot proceed.
+    unexpectedValues :: forall m x.
+                        (Panic.HasCallStack, MonadIO m)
+                     => String
+                     -> m x
+    unexpectedValues op =
+      panic [ "Unexpected values in " ++ op ++ ": " ++ show (CP.ppExpr origExpr)
+            , show xe1, show xe2
+            ]
 
 -- | Translate a ternary operation and its arguments into a what4 representation
 -- of the operation applied to the arguments.
 translateOp3 :: forall sym a b c d.
                 WI.IsExprBuilder sym
              => sym
+             -> CE.Expr d
+             -- ^ Original value we are translating (only used for error
+             -- messages)
              -> CE.Op3 a b c d
              -> XExpr sym
              -> XExpr sym
              -> XExpr sym
              -> IO (XExpr sym)
-translateOp3 sym (CE.Mux _) (XBool te) xe1 xe2 = case (xe1, xe2) of
+translateOp3 sym _origExpr (CE.Mux _) (XBool te) xe1 xe2 = case (xe1, xe2) of
   (XBool e1, XBool e2) -> XBool <$> WI.itePred sym te e1 e2
   (XInt8 e1, XInt8 e2) -> XInt8 <$> WI.bvIte sym te e1 e2
   (XInt16 e1, XInt16 e2) -> XInt16 <$> WI.bvIte sym te e1 e2
@@ -875,8 +915,16 @@ translateOp3 sym (CE.Mux _) (XBool te) xe1 xe2 = case (xe1, xe2) of
   (XWord64 e1, XWord64 e2) -> XWord64 <$> WI.bvIte sym te e1 e2
   (XFloat e1, XFloat e2) -> XFloat <$> WI.floatIte sym te e1 e2
   (XDouble e1, XDouble e2) -> XDouble <$> WI.floatIte sym te e1 e2
-  _ -> panic
-translateOp3 _ _ _ _ _ = panic
+  _ -> panic ["Unexpected values in ite", show xe1, show xe2]
+translateOp3 _ origExpr (CE.Mux _) xe1 xe2 xe3 =
+  unexpectedValues "mux operation"
+  where
+    unexpectedValues :: forall m x. (Panic.HasCallStack, MonadIO m) =>
+                        String -> m x
+    unexpectedValues op =
+      panic [ "Unexpected values in " ++ op ++ ":"
+            , show (CP.ppExpr origExpr), show xe1, show xe2, show xe3
+            ]
 
 -- What4 representations of Copilot expressions
 
@@ -936,7 +984,6 @@ instance Panic.PanicComponent CopilotWhat4 where
   panicComponentRevision = $(Panic.useGitRevision)
 
 -- | Use this function rather than an error monad since it indicates that
--- copilot-core's @reify@ function did something incorrectly.
-panic :: MonadIO m => m a
-panic = Panic.panic CopilotWhat4 "Copilot.Theorem.What4"
-        [ "Ill-typed core expression" ]
+-- something in the implementation of @copilot-theorem@ is incorrect.
+panic :: (Panic.HasCallStack, MonadIO m) => [String] -> m a
+panic msg = Panic.panic CopilotWhat4 "Copilot.Theorem.What4" msg

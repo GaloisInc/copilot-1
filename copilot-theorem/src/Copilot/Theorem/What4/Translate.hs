@@ -24,6 +24,7 @@ module Copilot.Theorem.What4.Translate
     TransState(..)
   , TransM
   , runTransM
+  , LocalEnv
   , translateExpr
     -- * What4 representations of Copilot expressions
   , XExpr(..)
@@ -38,6 +39,8 @@ import           Control.Monad.IO.Class         (MonadIO (..))
 import           Control.Monad.State            (MonadState (..), StateT (..),
                                                  gets, modify)
 import qualified Data.BitVector.Sized           as BV
+import           Data.IORef                     (newIORef, modifyIORef,
+                                                 readIORef)
 import           Data.List                      (elemIndex, genericIndex,
                                                  genericLength)
 import qualified Data.Map                       as Map
@@ -125,33 +128,69 @@ runTransM spec m = do
   (res, _) <- runStateT (unTransM m) st
   return res
 
--- | Compute the value of a stream expression at the given offset.
-translateExpr :: WFP.IsInterpretedFloatSymExprBuilder sym
+-- | An environment used to translate local Copilot variables to What4.
+type LocalEnv sym = Map.Map CE.Name (StreamOffset -> TransM sym (XExpr sym))
+
+-- | Compute the value of a stream expression at the given offset in the given
+-- local environment.
+translateExpr :: forall sym a.
+                 WFP.IsInterpretedFloatSymExprBuilder sym
               => sym
+              -> LocalEnv sym
+              -- ^ Environment for local variables
               -> CE.Expr a
               -- ^ Expression to translate
               -> StreamOffset
               -- ^ Offset to compute
               -> TransM sym (XExpr sym)
-translateExpr sym e offset = case e of
+translateExpr sym localEnv e offset = case e of
   CE.Const tp a -> liftIO $ translateConstExpr sym tp a
   CE.Drop _tp ix streamId -> getStreamValue sym streamId (addOffset offset ix)
-  CE.Local _ _ _ _ _ -> error "translateExpr: Local unimplemented"
-  CE.Var _ _ -> error "translateExpr: Var unimplemented"
+  CE.Local _tpa _tpb nm e1 body -> do
+    ref <- liftIO (newIORef mempty)
+
+    -- Look up a stream value by offset, using an IORef to cache values that
+    -- have already been looked up previously. Caching values in this way avoids
+    -- exponential blowup.
+    --
+    -- Note that using a single IORef to store all local variables means that it
+    -- is possible for local variables to escape their lexical scope. See issue
+    -- #253 for more information. This is an issue that is shared in common with
+    -- `copilot-c99` and the Copilot interpreter.
+    let f :: StreamOffset -> TransM sym (XExpr sym)
+        f offset' = do
+          m <- liftIO (readIORef ref)
+          case Map.lookup offset' m of
+            -- If we have looked up this value before, return the cached value.
+            Just x -> return x
+            -- Otherwise, translate the expression and cache it for subsequent
+            -- lookups.
+            Nothing ->
+              do x <- translateExpr sym localEnv e1 offset'
+                 liftIO (modifyIORef ref (Map.insert offset' x))
+                 return x
+
+    let localEnv' = Map.insert nm f localEnv
+    translateExpr sym localEnv' body offset
+  CE.Var _tp nm ->
+    case Map.lookup nm localEnv of
+      Nothing -> panic ["translateExpr: unknown var " ++ show nm]
+      Just f  -> f offset
   CE.ExternVar tp nm _prefix -> getExternConstant sym tp nm offset
   CE.Op1 op e1 -> do
-    xe1 <- translateExpr sym e1 offset
+    xe1 <- translateExpr sym localEnv e1 offset
     translateOp1 sym e op xe1
   CE.Op2 op e1 e2 -> do
-    xe1 <- translateExpr sym e1 offset
-    xe2 <- translateExpr sym e2 offset
+    xe1 <- translateExpr sym localEnv e1 offset
+    xe2 <- translateExpr sym localEnv e2 offset
     translateOp2 sym e op xe1 xe2
   CE.Op3 op e1 e2 e3 -> do
-    xe1 <- translateExpr sym e1 offset
-    xe2 <- translateExpr sym e2 offset
-    xe3 <- translateExpr sym e3 offset
+    xe1 <- translateExpr sym localEnv e1 offset
+    xe2 <- translateExpr sym localEnv e2 offset
+    xe3 <- translateExpr sym localEnv e3 offset
     translateOp3 sym e op xe1 xe2 xe3
-  CE.Label _ _ _ -> error "translateExpr: Label unimplemented"
+  CE.Label _ _ e1 ->
+    translateExpr sym localEnv e1 offset
 
 -- | Compute and cache the value of a stream with the given identifier at the
 -- given offset.
@@ -182,13 +221,13 @@ getStreamValue sym streamId offset = do
           | i < 0     -> panic ["Invalid absolute offset " ++ show i ++
                                 " for stream " ++ show id]
           | i < len   -> liftIO (translateConstExpr sym tp (genericIndex buf i))
-          | otherwise -> translateExpr sym ex (AbsoluteOffset (i - len))
+          | otherwise -> translateExpr sym mempty ex (AbsoluteOffset (i - len))
         RelativeOffset i
           | i < 0     -> panic ["Invalid relative offset " ++ show i ++
                                 " for stream " ++ show id]
           | i < len   -> let nm = "s" ++ show id ++ "_r" ++ show i
                          in liftIO (freshCPConstant sym nm tp)
-          | otherwise -> translateExpr sym ex (RelativeOffset (i - len))
+          | otherwise -> translateExpr sym mempty ex (RelativeOffset (i - len))
 
 -- | Compute and cache the value of an external stream with the given name at
 -- the given offset.

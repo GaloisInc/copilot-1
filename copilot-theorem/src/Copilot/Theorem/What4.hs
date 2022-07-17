@@ -132,12 +132,13 @@ prove solver spec = do
         let bufLen (CS.Stream _ buf _ _) = genericLength buf
             maxBufLen = maximum (0 : (bufLen <$> CS.specStreams spec))
         prefix <- forM [0 .. maxBufLen - 1] $ \k -> do
-          xe <- translateExpr sym (CS.propertyExpr pr) (AbsoluteOffset k)
+          xe <- translateExpr sym mempty (CS.propertyExpr pr) (AbsoluteOffset k)
           case xe of
             XBool p -> return p
             _ -> expectedBool xe
         p <- do
           xe <- translateExpr sym
+                              mempty
                               (CS.propertyExpr pr)
                               (RelativeOffset maxBufLen)
           case xe of

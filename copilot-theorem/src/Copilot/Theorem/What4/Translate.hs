@@ -486,8 +486,10 @@ translateOp1 sym origExpr op xe = case (op, xe) of
         mIx :: CT.Struct struct => struct -> Maybe Int
         mIx s = elemIndex (Some fieldNameRepr) (structFieldNameReprs s)
 
-    -- Translate a 'CE.Sign' operation and its argument into a what4
-    -- representation of the appropriate type.
+    -- Translate a 'CE.Sign' operation (i.e, 'signum') and its argument into a
+    -- what4 representation of the appropriate type. We translate @signum x@ as
+    -- @x > 0 ? 1 : (x < 0 ? -1 : x)@. This matches how copilot-c99 translates
+    -- 'CE.Sign' to C code.
     translateSign :: XExpr sym -> IO (XExpr sym)
     translateSign xe = numOp bvSign fpSign xe
       where
@@ -496,20 +498,20 @@ translateOp1 sym origExpr op xe = case (op, xe) of
           zero <- WI.bvLit sym knownRepr (BV.zero knownNat)
           neg_one <- WI.bvLit sym knownNat (BV.mkBV knownNat (-1))
           pos_one <- WI.bvLit sym knownNat (BV.mkBV knownNat 1)
-          e_zero <- WI.bvEq sym e zero
           e_neg <- WI.bvSlt sym e zero
-          t <- WI.bvIte sym e_neg neg_one pos_one
-          WI.bvIte sym e_zero zero t
+          e_pos <- WI.bvSgt sym e zero
+          t <- WI.bvIte sym e_neg neg_one e
+          WI.bvIte sym e_pos pos_one t
 
         fpSign :: forall fi . FPOp1 sym fi
         fpSign fiRepr e = do
-          zero <- WFP.iFloatPZero sym fiRepr
+          zero    <- fpLit fiRepr   0.0
           neg_one <- fpLit fiRepr (-1.0)
           pos_one <- fpLit fiRepr   1.0
-          e_zero <- WFP.iFloatEq @_ @fi sym e zero
           e_neg <- WFP.iFloatLt @_ @fi sym e zero
-          t <- WFP.iFloatIte @_ @fi sym e_neg neg_one pos_one
-          WFP.iFloatIte @_ @fi sym e_zero zero t
+          e_pos <- WFP.iFloatGt @_ @fi sym e zero
+          t <- WFP.iFloatIte @_ @fi sym e_neg neg_one e
+          WFP.iFloatIte @_ @fi sym e_pos pos_one t
 
     -- Check the type of the argument. If the argument is a bitvector value,
     -- apply the 'BVOp1'. If the argument is a floating-point value, apply the

@@ -26,6 +26,9 @@ module Copilot.Theorem.What4.Translate
   , runTransM
   , LocalEnv
   , translateExpr
+  , translateConstExpr
+  , getStreamValue
+  , getExternConstant
     -- * What4 representations of Copilot expressions
   , XExpr(..)
     -- * Stream offsets
@@ -87,6 +90,9 @@ import qualified Copilot.Core.Type.Array        as CT
 -- translation and is never modified. This maps from stream ids to the
 -- core stream definitions.
 data TransState sym = TransState {
+  -- | Map keeping track of all external variables encountered during
+  -- translation.
+  mentionedExternals :: Map.Map CE.Name (Some CT.Type),
   -- | Memo table for external variables, indexed by the external stream name
   -- and a stream offset.
   externVars :: Map.Map (CE.Name, StreamOffset) (XExpr sym),
@@ -119,7 +125,8 @@ runTransM spec m = do
   let streamMap = Map.fromList $
         (\stream -> (CS.streamId stream, stream)) <$> CS.specStreams spec
       st = TransState
-           { externVars = mempty
+           { mentionedExternals = mempty
+           , externVars = mempty
            , streamValues = mempty
            , streams = streamMap
            , sidePreds = []
@@ -245,6 +252,8 @@ getExternConstant sym tp nm offset = do
       xe <- computeExternConstant
       modify $ \st ->
         st { externVars = Map.insert (nm, offset) xe (externVars st)
+           , mentionedExternals =
+               Map.insert nm (Some tp) (mentionedExternals st)
            }
       return xe
  where

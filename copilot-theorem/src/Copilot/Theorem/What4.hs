@@ -33,7 +33,17 @@
 -- @k@ is chosen to be the maximum amount of delay on any of the involved
 -- streams. This is a heuristic choice, but often effective.
 module Copilot.Theorem.What4
-  ( prove, Solver(..), SatResult(..)
+  ( -- * Proving properties about Copilot specifications
+    prove
+  , Solver(..)
+  , SatResult(..)
+    -- * Bisimulation proofs about @copilot-c99@ code
+  , computeBisimulationProofBundle
+  , BisimulationProofBundle(..)
+  , BisimulationProofState(..)
+    -- Re-exports from Copilot.Theorem.What4.Translate
+    -- * What4 representations of Copilot expressions
+  , XExpr(..)
   ) where
 
 import qualified Copilot.Core.Expr       as CE
@@ -52,6 +62,7 @@ import Control.Monad.State
 import qualified Data.BitVector.Sized as BV
 import Data.Foldable (foldrM)
 import Data.List (genericLength)
+import qualified Data.Map as Map
 import Data.Parameterized.NatRepr
 import Data.Parameterized.Nonce
 import Data.Parameterized.Some
@@ -112,7 +123,7 @@ prove solver spec = do
           xe <- translateExpr sym mempty (CS.propertyExpr pr) (AbsoluteOffset i)
           case xe of
             XBool p -> return p
-            _ -> expectedBool xe
+            _ -> expectedBool "Property" xe
 
         -- Translate the induction hypothesis for all values up to maxBufLen in
         -- the past
@@ -120,7 +131,7 @@ prove solver spec = do
           xe <- translateExpr sym mempty (CS.propertyExpr pr) (RelativeOffset i)
           case xe of
             XBool hyp -> return hyp
-            _ -> expectedBool xe
+            _ -> expectedBool "Property" xe
 
         -- Translate the predicate for the "current" value
         ind_goal <- do
@@ -130,7 +141,7 @@ prove solver spec = do
                               (RelativeOffset maxBufLen)
           case xe of
             XBool p -> return p
-            _ -> expectedBool xe
+            _ -> expectedBool "Property" xe
 
         -- Compute the predicate (ind_hyps ==> p)
         ind_case <- liftIO $ foldrM (WI.impliesPred sym) ind_goal ind_hyps
@@ -162,13 +173,219 @@ prove solver spec = do
 
   -- Execute the action and return the results for each property
   runTransM spec proveProperties
+
+-- Bisimulation proofs
+
+-- | Given a Copilot specification, compute all of the symbolic states necessary
+-- to carry out a bisimulation proof that establishes a correspondence between
+-- the states of the Copilot stream program and the C code that @copilot-c99@
+-- would generate for that Copilot program.
+computeBisimulationProofBundle ::
+     WFP.IsInterpretedFloatSymExprBuilder sym
+  => sym
+  -> [String]
+  -- ^ Names of properties to assume during verification
+  -> CS.Spec
+  -- ^ The input Copilot specification
+  -> IO (BisimulationProofBundle sym)
+computeBisimulationProofBundle sym properties spec = do
+  iss <- computeInitialStreamState sym spec
+  runTransM spec $ do
+    prestate  <- computePrestate sym spec
+    poststate <- computePoststate sym spec
+    triggers  <- computeTriggerState sym spec
+    assms     <- computeAssumptions sym properties spec
+    externs   <- computeExternalInputs sym
+    sideCnds  <- gets sidePreds
+    return
+      BisimulationProofBundle
+      { initialStreamState = iss
+      , preStreamState  = prestate
+      , postStreamState = poststate
+      , externalInputs  = externs
+      , triggerState    = triggers
+      , assumptions     = assms
+      , sideConds       = sideCnds
+      }
+
+-- | A collection of all of the symbolic states necessary to carry out a
+-- bisimulation proof.
+data BisimulationProofBundle sym =
+  BisimulationProofBundle
+  { initialStreamState :: BisimulationProofState sym
+    -- ^ The state of the global variables at program startup
+  , preStreamState :: BisimulationProofState sym
+    -- ^ The stream state prior to invoking the step function
+  , postStreamState :: BisimulationProofState sym
+    -- ^ The stream state after invoking the step function
+  , externalInputs :: [(CE.Name, Some CT.Type, XExpr sym)]
+    -- ^ A list of external streams, where each tuple contains:
+    --
+    -- 1. The name of the stream
+    --
+    -- 2. The type of the stream
+    --
+    -- 3. The value of the stream represented as a fresh constant
+  , triggerState :: [(CE.Name, WI.Pred sym, [(Some CT.Type, XExpr sym)])]
+    -- ^ A list of trigger functions, where each tuple contains:
+    --
+    -- 1. The name of the function
+    --
+    -- 2. A formula representing the guarded condition
+    --
+    -- 3. The arguments to the function, where each argument is represented as
+    --    a type-value pair
+  , assumptions :: [WI.Pred sym]
+    -- ^ User-provided property assumptions
+  , sideConds :: [WI.Pred sym]
+    -- ^ Side conditions related to partial operations
+  }
+
+-- | The state of a bisimulation proof at a particular step.
+newtype BisimulationProofState sym =
+  BisimulationProofState
+  { streamState :: [(CE.Id, Some CT.Type, [XExpr sym])]
+    -- ^ A list of tuples containing:
+    --
+    -- 1. The name of a stream
+    --
+    -- 2. The type of the stream
+    --
+    -- 3. The list of values in the stream description
+  }
+
+-- | Compute the initial state of the global variables at the start of a Copilot
+-- program.
+computeInitialStreamState ::
+     WFP.IsInterpretedFloatSymExprBuilder sym
+  => sym
+  -> CS.Spec
+  -- ^ The input Copilot specification
+  -> IO (BisimulationProofState sym)
+computeInitialStreamState sym spec = do
+  xs <- forM (CS.specStreams spec) $
+         \CS.Stream { CS.streamId = nm, CS.streamExprType = tp
+                    , CS.streamBuffer = buf } ->
+         do vs <- mapM (translateConstExpr sym tp) buf
+            return (nm, Some tp, vs)
+  return (BisimulationProofState xs)
+
+-- | Compute the stream state of a Copilot program prior to invoking the step
+-- function.
+computePrestate ::
+     WFP.IsInterpretedFloatSymExprBuilder sym
+  => sym
+  -> CS.Spec
+  -- ^ The input Copilot specification
+  -> TransM sym (BisimulationProofState sym)
+computePrestate sym spec = do
+  xs <- forM (CS.specStreams spec) $
+          \CS.Stream { CS.streamId = nm, CS.streamExprType = tp
+                     , CS.streamBuffer = buf } ->
+          do let buflen = genericLength buf
+             let idxes = RelativeOffset <$> [0 .. buflen-1]
+             vs <- mapM (getStreamValue sym nm) idxes
+             return (nm, Some tp, vs)
+  return (BisimulationProofState xs)
+
+-- | Compute ehe stream state of a Copilot program after invoking the step
+-- function.
+computePoststate ::
+     WFP.IsInterpretedFloatSymExprBuilder sym
+  => sym
+  -> CS.Spec
+  -- ^ The input Copilot specification
+  -> TransM sym (BisimulationProofState sym)
+computePoststate sym spec = do
+  xs <- forM (CS.specStreams spec) $
+          \CS.Stream { CS.streamId = nm, CS.streamExprType = tp
+                     , CS.streamBuffer = buf } ->
+          do let buflen = genericLength buf
+             let idxes = RelativeOffset <$> [1 .. buflen]
+             vs <- mapM (getStreamValue sym nm) idxes
+             return (nm, Some tp, vs)
+  return (BisimulationProofState xs)
+
+-- | Compute the trigger functions in a Copilot program.
+computeTriggerState ::
+     WFP.IsInterpretedFloatSymExprBuilder sym
+  => sym
+  -> CS.Spec
+  -- ^ The input Copilot specification
+  -> TransM sym [(CE.Name, WI.Pred sym, [(Some CT.Type, XExpr sym)])]
+computeTriggerState sym spec = forM (CS.specTriggers spec) $
+    \(CS.Trigger { CS.triggerName = nm, CS.triggerGuard = guard
+                 , CS.triggerArgs = args }) ->
+      do xguard <- translateExpr sym mempty guard (RelativeOffset 0)
+         guard' <-
+           case xguard of
+             XBool guard' -> return guard'
+             _ -> expectedBool "Trigger guard" xguard
+         args' <- mapM computeArg args
+         return (nm, guard', args')
   where
-    expectedBool :: forall m sym a.
-                    (Panic.HasCallStack, MonadIO m, WI.IsExprBuilder sym)
-                 => XExpr sym
-                 -> m a
-    expectedBool xe =
-      panic ["Property expected to have boolean result", show xe]
+   computeArg (CE.UExpr { CE.uExprType = tp, CE.uExprExpr = ex }) = do
+     v <- translateExpr sym mempty ex (RelativeOffset 0)
+     return (Some tp, v)
+
+-- | Compute the values of the external streams in a Copilot program, where each
+-- external stream is represented as a fresh constant.
+computeExternalInputs ::
+     WFP.IsInterpretedFloatSymExprBuilder sym
+  => sym
+  -> TransM sym [(CE.Name, Some CT.Type, XExpr sym)]
+computeExternalInputs sym = do
+  exts <- Map.toList <$> gets mentionedExternals
+  forM exts $ \(nm, Some tp) -> do
+    v <- getExternConstant sym tp nm (RelativeOffset 0)
+    return (nm, Some tp, v)
+
+-- | Compute the user-provided property assumptions in a Copilot program.
+computeAssumptions ::
+     forall sym.
+     WFP.IsInterpretedFloatSymExprBuilder sym
+  => sym
+  -> [String]
+  -- ^ Names of properties to assume during verification
+  -> CS.Spec
+  -- ^ The input Copilot specification
+  -> TransM sym [WI.Pred sym]
+computeAssumptions sym properties spec =
+  concat <$> forM specPropertyExprs computeAssumption
+ where
+  bufLen (CS.Stream _ buf _ _) = genericLength buf
+  maxBufLen = maximum (0 : (bufLen <$> CS.specStreams spec))
+
+  -- Retrieve the boolean-values Copilot expressions corresponding to the
+  -- user-provided property assumptions.
+  specPropertyExprs :: [CE.Expr Bool]
+  specPropertyExprs =
+    [ CS.propertyExpr p
+    | p <- CS.specProperties spec
+    , elem (CS.propertyName p) properties
+    ]
+
+  -- Compute all of the what4 predicates corresponding to each user-provided
+  -- property assumption.
+  computeAssumption :: CE.Expr Bool -> TransM sym [WI.Pred sym]
+  computeAssumption e = forM [0 .. maxBufLen] $ \i -> do
+    xe <- translateExpr sym mempty e (RelativeOffset i)
+    case xe of
+      XBool b -> return b
+      _ -> expectedBool "Property" xe
+
+-- Auxiliary functions
+
+-- | A catch-all 'panic' to use when an 'XExpr' is is expected to uphold the
+-- invariant that it is an 'XBool', but the invariant is violated.
+expectedBool :: forall m sym a.
+                (Panic.HasCallStack, MonadIO m, WI.IsExprBuilder sym)
+             => String
+             -- ^ What the 'XExpr' represents
+             -> XExpr sym
+             -> m a
+expectedBool what xe =
+  panic [what ++ " expected to have boolean result", show xe]
 
 data CopilotValue a = CopilotValue { cvType :: CT.Type a
                                    , cvVal :: a

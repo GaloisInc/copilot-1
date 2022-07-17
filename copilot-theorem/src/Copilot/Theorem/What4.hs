@@ -26,38 +26,12 @@
 -- @What4@. A backend solver is then used to prove the property is true. The
 -- technique is sound, but incomplete. If a property is proved true by this
 -- technique, then it can be guaranteed to be true. However, if a property is
--- not proved true, that does not mean it isn't true. Very simple specifications
--- are unprovable by this technique, including:
+-- not proved true, that does not mean it isn't true; the proof may fail because
+-- the given property is not inductive.
 --
--- @
--- a = True : a
--- @
---
--- The above specification will not be proved true. The reason is that this
--- technique does not perform any sort of induction. When proving the inner @a@
--- expression, the technique merely allocates a fresh constant standing for
--- "@a@, one timestep in the past." Nothing is asserted about the fresh
--- constant.
---
--- An example of a property that is provable by this approach is:
---
--- @
--- a = True : b
--- b = not a
---
--- -- Property: a || b
--- @
---
--- By allocating a fresh constant, @b_-1@, standing for "the value of @b@ one
--- timestep in the past", the equation for @a || b@ at some arbitrary point in
--- the future reduces to @b_-1 || not b_-1@, which is always true.
---
--- In addition to proving that the stream expression is true at some arbitrary
--- point in the future, we also prove it for the first @k@ timesteps, where @k@
--- is the maximum buffer length of all streams in the given spec. This amounts
--- to simply interpreting the spec, although external variables are still
--- represented as constants with unknown values.
-
+-- We perform @k@-induction on all the properties in a given specification where
+-- @k@ is chosen to be the maximum amount of delay on any of the involved
+-- streams. This is a heuristic choice, but often effective.
 module Copilot.Theorem.What4
   ( prove, Solver(..), SatResult(..)
   ) where
@@ -126,17 +100,30 @@ prove solver spec = do
     Yices -> WC.extendConfig WS.yicesOptions (WI.getConfiguration sym)
     Z3 -> WC.extendConfig WS.z3Options (WI.getConfiguration sym)
 
-  -- Define TransM action for proving properties. Doing this in TransM rather
-  -- than IO allows us to reuse the state for each property.
+  -- Compute the maximum amount of delay for any stream in this spec
+  let bufLen (CS.Stream _ buf _ _) = genericLength buf
+      maxBufLen = maximum (0 : (bufLen <$> CS.specStreams spec))
+
+  -- This process performs k-induction where we use @k = maxBufLen@.
+  -- The choice for @k@ is heuristic, but often effective.
   let proveProperties = forM (CS.specProperties spec) $ \pr -> do
-        let bufLen (CS.Stream _ buf _ _) = genericLength buf
-            maxBufLen = maximum (0 : (bufLen <$> CS.specStreams spec))
-        prefix <- forM [0 .. maxBufLen - 1] $ \k -> do
-          xe <- translateExpr sym mempty (CS.propertyExpr pr) (AbsoluteOffset k)
+        -- State the base cases for k induction.
+        base_cases <- forM [0 .. maxBufLen - 1] $ \i -> do
+          xe <- translateExpr sym mempty (CS.propertyExpr pr) (AbsoluteOffset i)
           case xe of
             XBool p -> return p
             _ -> expectedBool xe
-        p <- do
+
+        -- Translate the induction hypothesis for all values up to maxBufLen in
+        -- the past
+        ind_hyps <- forM [0 .. maxBufLen-1] $ \i -> do
+          xe <- translateExpr sym mempty (CS.propertyExpr pr) (RelativeOffset i)
+          case xe of
+            XBool hyp -> return hyp
+            _ -> expectedBool xe
+
+        -- Translate the predicate for the "current" value
+        ind_goal <- do
           xe <- translateExpr sym
                               mempty
                               (CS.propertyExpr pr)
@@ -144,10 +131,17 @@ prove solver spec = do
           case xe of
             XBool p -> return p
             _ -> expectedBool xe
-        p_and_prefix <- liftIO $ foldrM (WI.andPred sym) p prefix
-        not_p_and_prefix <- liftIO $ WI.notPred sym p_and_prefix
 
-        let clauses = [not_p_and_prefix]
+        -- Compute the predicate (ind_hyps ==> p)
+        ind_case <- liftIO $ foldrM (WI.impliesPred sym) ind_goal ind_hyps
+
+        -- Compute the conjunction of the base and inductive cases
+        p <- liftIO $ foldrM (WI.andPred sym) ind_case base_cases
+
+        -- Negate the goals for for SAT search
+        not_p <- liftIO $ WI.notPred sym p
+        let clauses = [not_p]
+
         case solver of
           CVC4 -> liftIO $ WS.runCVC4InOverride sym WS.defaultLogData clauses $ \case
             WS.Sat (_ge, _) -> return (CS.propertyName pr, Invalid)

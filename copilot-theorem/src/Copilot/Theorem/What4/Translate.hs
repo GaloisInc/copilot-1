@@ -32,7 +32,7 @@ module Copilot.Theorem.What4.Translate
   , panic
   ) where
 
-import           Control.Monad                  (forM, zipWithM, (<=<))
+import           Control.Monad                  (forM, zipWithM)
 import           Control.Monad.IO.Class         (MonadIO (..))
 import           Control.Monad.State            (MonadState (..), StateT (..),
                                                  gets, modify)
@@ -41,8 +41,7 @@ import           Data.List                      (elemIndex, genericLength)
 import qualified Data.Map                       as Map
 import           Data.Maybe                     (fromJust)
 import           Data.Parameterized.Classes     (KnownRepr (..))
-import           Data.Parameterized.Context     (EmptyCtx, pattern (:>),
-                                                 pattern Empty, type (::>))
+import           Data.Parameterized.Context     (EmptyCtx, type (::>))
 import           Data.Parameterized.NatRepr     (LeqProof (..), NatCases (..),
                                                  NatRepr, decNat, isZeroOrGT1,
                                                  knownNat, minusPlusCancel,
@@ -78,11 +77,10 @@ import qualified Copilot.Core.Type.Array        as CT
 -- isn't, we generate a fresh constant at that point, store it in the map, and
 -- return it.
 --
--- We also store three immutable fields in this state, rather than wrap them up
--- in another monad transformer layer. These are initialized prior to
--- translation and are never modified. They are the map from stream ids to the
--- core stream definitions, a symbolic uninterpreted function for "pow", and a
--- symbolic uninterpreted function for "logb".
+-- We also store 'streams', an immutable field, in this state, rather than wrap
+-- it up in another monad transformer layer. This is initialized prior to
+-- translation and is never modified. This maps from stream ids to the
+-- core stream definitions.
 data TransState sym = TransState {
   -- | Map of all external variables we encounter during translation. These are
   -- just fresh constants. The offset indicates how many timesteps in the past
@@ -99,15 +97,7 @@ data TransState sym = TransState {
   -- | Map from stream ids to the streams themselves. This value is never
   -- modified, but I didn't want to make this an RWS, so it's represented as a
   -- stateful value.
-  streams :: Map.Map CE.Id CS.Stream,
-  -- | Binary power operator, represented as an uninterpreted function.
-  pow :: WI.SymFn sym
-         (EmptyCtx ::> WT.BaseRealType ::> WT.BaseRealType)
-         WT.BaseRealType,
-  -- | Binary logarithm operator, represented as an uninterpreted function.
-  logb :: WI.SymFn sym
-          (EmptyCtx ::> WT.BaseRealType ::> WT.BaseRealType)
-          WT.BaseRealType
+  streams :: Map.Map CE.Id CS.Stream
   }
 
 -- | A monad that tracks state needed when translating Copilot specifications to
@@ -122,20 +112,16 @@ newtype TransM sym a = TransM { unTransM :: StateT (TransState sym) IO a }
            )
 
 -- | Translate a Copilot specification using the given 'TransM' computation.
-runTransM :: WI.IsSymExprBuilder sym => sym -> CS.Spec -> TransM sym a -> IO a
-runTransM sym spec m = do
+runTransM :: CS.Spec -> TransM sym a -> IO a
+runTransM spec m = do
   -- Build up initial translation state
   let streamMap = Map.fromList $
         (\stream -> (CS.streamId stream, stream)) <$> CS.specStreams spec
-  pow <- WI.freshTotalUninterpFn sym (WI.safeSymbol "pow") knownRepr knownRepr
-  logb <- WI.freshTotalUninterpFn sym (WI.safeSymbol "logb") knownRepr knownRepr
-  let st = TransState
+      st = TransState
            { externVars = mempty
            , externVarsAt = mempty
            , streamConstants = mempty
            , streams = streamMap
-           , pow = pow
-           , logb = logb
            }
 
   (res, _) <- runStateT (unTransM m) st
@@ -176,9 +162,7 @@ translateExpr sym offset e = case e of
   CE.Op2 op e1 e2 -> do
     xe1 <- translateExpr sym offset e1
     xe2 <- translateExpr sym offset e2
-    powFn <- gets pow
-    logbFn <- gets logb
-    liftIO $ translateOp2 sym e powFn logbFn op xe1 xe2
+    liftIO $ translateOp2 sym e op xe1 xe2
   CE.Op3 op e1 e2 e3 -> do
     xe1 <- translateExpr sym offset e1
     xe2 <- translateExpr sym offset e2
@@ -214,9 +198,7 @@ translateExprAt sym k e =
     CE.Op2 op e1 e2 -> do
       xe1 <- translateExprAt sym k e1
       xe2 <- translateExprAt sym k e2
-      powFn <- gets pow
-      logbFn <- gets logb
-      liftIO $ translateOp2 sym e powFn logbFn op xe1 xe2
+      liftIO $ translateOp2 sym e op xe1 xe2
     CE.Op3 op e1 e2 e3 -> do
       xe1 <- translateExprAt sym k e1
       xe2 <- translateExprAt sym k e2
@@ -404,11 +386,6 @@ type FPOp1 sym fi =
   -> WI.SymExpr sym (WFP.SymInterpretedFloatType sym fi)
   -> IO (WI.SymExpr sym (WFP.SymInterpretedFloatType sym fi))
 
--- | A unary operation over real number values.
-type RealOp1 sym =
-     WI.SymExpr sym WT.BaseRealType
-  -> IO (WI.SymExpr sym WT.BaseRealType)
-
 -- | Retrieve a 'CT.Field' name as a 'SymbolRepr'.
 fieldName :: KnownSymbol s => CT.Field s a -> SymbolRepr s
 fieldName _ = knownSymbol
@@ -420,7 +397,7 @@ valueName (CT.Value _ f) = Some (fieldName f)
 -- | Translate a unary operation and its argument into a what4 representation of
 -- the operation applied to the argument.
 translateOp1 :: forall sym a b.
-                WFP.IsInterpretedFloatSymExprBuilder sym
+                WFP.IsInterpretedFloatExprBuilder sym
              => sym
              -> CE.Expr b
              -- ^ Original value we are translating (only used for error
@@ -439,22 +416,22 @@ translateOp1 sym origExpr op xe = case (op, xe) of
       recip fiRepr e = do
         one <- fpLit fiRepr 1.0
         WFP.iFloatDiv @_ @fi sym fpRM one e
-  (CE.Exp _, xe) -> realOp (WI.realExp sym) xe
+  (CE.Exp _, xe) -> fpSpecialOp WSF.Exp xe
   (CE.Sqrt _, xe) ->
     fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatSqrt @_ @fi sym fpRM) xe
-  (CE.Log _, xe) -> realOp (WI.realLog sym) xe
-  (CE.Sin _, xe) -> realOp (WI.realSin sym) xe
-  (CE.Cos _, xe) -> realOp (WI.realCos sym) xe
-  (CE.Tan _, xe) -> realOp (WI.realTan sym) xe
-  (CE.Asin _, xe) -> realOp (realRecip <=< WI.realSin sym) xe
-  (CE.Acos _, xe) -> realOp (realRecip <=< WI.realCos sym) xe
-  (CE.Atan _, xe) -> realOp (realRecip <=< WI.realTan sym) xe
-  (CE.Sinh _, xe) -> realOp (WI.realSinh sym) xe
-  (CE.Cosh _, xe) -> realOp (WI.realCosh sym) xe
-  (CE.Tanh _, xe) -> realOp (WI.realTanh sym) xe
-  (CE.Asinh _, xe) -> realOp (realRecip <=< WI.realSinh sym) xe
-  (CE.Acosh _, xe) -> realOp (realRecip <=< WI.realCosh sym) xe
-  (CE.Atanh _, xe) -> realOp (realRecip <=< WI.realTanh sym) xe
+  (CE.Log _, xe) -> fpSpecialOp WSF.Log xe
+  (CE.Sin _, xe) -> fpSpecialOp WSF.Sin xe
+  (CE.Cos _, xe) -> fpSpecialOp WSF.Cos xe
+  (CE.Tan _, xe) -> fpSpecialOp WSF.Tan xe
+  (CE.Sinh _, xe) -> fpSpecialOp WSF.Sinh xe
+  (CE.Cosh _, xe) -> fpSpecialOp WSF.Cosh xe
+  (CE.Tanh _, xe) -> fpSpecialOp WSF.Tanh xe
+  (CE.Asin _, xe) -> fpSpecialOp WSF.Arcsin xe
+  (CE.Acos _, xe) -> fpSpecialOp WSF.Arccos xe
+  (CE.Atan _, xe) -> fpSpecialOp WSF.Arctan xe
+  (CE.Asinh _, xe) -> fpSpecialOp WSF.Arcsinh xe
+  (CE.Acosh _, xe) -> fpSpecialOp WSF.Arccosh xe
+  (CE.Atanh _, xe) -> fpSpecialOp WSF.Arctanh xe
   (CE.Ceiling _, xe) ->
     fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatRound @_ @fi sym WI.RTP) xe
   (CE.Floor _, xe) ->
@@ -572,19 +549,12 @@ translateOp1 sym origExpr op xe = case (op, xe) of
       XDouble e -> XDouble <$> g WFP.DoubleFloatRepr e
       _ -> unexpectedValue "fpOp"
 
-    realOp :: RealOp1 sym -> XExpr sym -> IO (XExpr sym)
-    realOp h xe = fpOp hf xe
-      where
-        hf :: forall fi . FPOp1 sym fi
-        hf fiRepr e = do
-          re <- WFP.iFloatToReal @_ @fi sym e
-          hre <- h re
-          WFP.iRealToFloat sym fiRepr fpRM hre
-
-    realRecip :: RealOp1 sym
-    realRecip e = do
-      one <- WI.realLit sym 1
-      WI.realDiv sym one e
+    -- Translate a special-floating operation to the corresponding what4
+    -- operation. These operations will be treated as uninterpreted functions in
+    -- the solver.
+    fpSpecialOp :: WSF.SpecialFunction (EmptyCtx ::> WSF.R)
+                -> XExpr sym -> IO (XExpr sym)
+    fpSpecialOp fn = fpOp (\fiRepr -> WFP.iFloatSpecialFunction1 sym fiRepr fn)
 
     -- Construct a floating-point literal value of the appropriate type.
     fpLit :: forall fi.
@@ -621,12 +591,6 @@ type FPOp2 sym fi =
   -> WI.SymExpr sym (WFP.SymInterpretedFloatType sym fi)
   -> IO (WI.SymExpr sym (WFP.SymInterpretedFloatType sym fi))
 
--- | A binary operation over real number values.
-type RealOp2 sym =
-     WI.SymExpr sym WT.BaseRealType
-  -> WI.SymExpr sym WT.BaseRealType
-  -> IO (WI.SymExpr sym WT.BaseRealType)
-
 -- | A binary predicate that checks if two boolean values are equal.
 type BoolCmp2 sym =
      WI.Pred sym
@@ -650,24 +614,16 @@ type FPCmp2 sym fi =
 -- | Translate a binary operation and its arguments into a what4 representation
 -- of the operation applied to the arguments.
 translateOp2 :: forall sym a b c.
-                WFP.IsInterpretedFloatSymExprBuilder sym
+                WFP.IsInterpretedFloatExprBuilder sym
              => sym
              -> CE.Expr c
              -- ^ Original value we are translating (only used for error
              -- messages)
-             -> (WI.SymFn sym
-                 (EmptyCtx ::> WT.BaseRealType ::> WT.BaseRealType)
-                 WT.BaseRealType)
-             -- ^ Pow function
-             -> (WI.SymFn sym
-                 (EmptyCtx ::> WT.BaseRealType ::> WT.BaseRealType)
-                 WT.BaseRealType)
-             -- ^ Logb function
              -> CE.Op2 a b c
              -> XExpr sym
              -> XExpr sym
              -> IO (XExpr sym)
-translateOp2 sym origExpr powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
+translateOp2 sym origExpr op xe1 xe2 = case (op, xe1, xe2) of
   (CE.And, XBool e1, XBool e2) -> XBool <$> WI.andPred sym e1 e2
   (CE.And, _, _) -> unexpectedValues "and operation"
   (CE.Or, XBool e1, XBool e2) -> XBool <$> WI.orPred sym e1 e2
@@ -693,24 +649,16 @@ translateOp2 sym origExpr powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
     fpOp (\(_ :: WFP.FloatInfoRepr fi) -> WFP.iFloatDiv @_ @fi sym fpRM)
          xe1
          xe2
-  (CE.Pow _, xe1, xe2) -> fpOp powFn' xe1 xe2
+  (CE.Pow _, xe1, xe2) -> fpSpecialOp WSF.Pow xe1 xe2
+  (CE.Logb _, xe1, xe2) -> fpOp logbFn xe1 xe2
     where
-      powFn' :: forall fi . FPOp2 sym fi
-      powFn' fiRepr e1 e2 = do
-        re1 <- WFP.iFloatToReal @_ @fi sym e1
-        re2 <- WFP.iFloatToReal @_ @fi sym e2
-        let args = (Empty :> re1 :> re2)
-        rpow <- WI.applySymFn sym powFn args
-        WFP.iRealToFloat sym fiRepr fpRM rpow
-  (CE.Logb _, xe1, xe2) -> fpOp logbFn' xe1 xe2
-    where
-      logbFn' :: forall fi . FPOp2 sym fi
-      logbFn' fiRepr e1 e2 = do
-        re1 <- WFP.iFloatToReal @_ @fi sym e1
-        re2 <- WFP.iFloatToReal @_ @fi sym e2
-        let args = (Empty :> re1 :> re2)
-        rpow <- WI.applySymFn sym logbFn args
-        WFP.iRealToFloat sym fiRepr fpRM rpow
+      logbFn :: forall fi . FPOp2 sym fi
+      -- Implement logb(e1,e2) as log(e2)/log(e1). This matches how copilot-c99
+      -- translates Logb to C code.
+      logbFn fiRepr e1 e2 = do
+        re1 <- WFP.iFloatSpecialFunction1 sym fiRepr WSF.Log e1
+        re2 <- WFP.iFloatSpecialFunction1 sym fiRepr WSF.Log e2
+        WFP.iFloatDiv @_ @fi sym fpRM re2 re1
   (CE.Atan2 _, xe1, xe2) -> fpSpecialOp WSF.Arctan2 xe1 xe2
   (CE.Eq _, xe1, xe2) ->
     cmp (WI.eqPred sym)

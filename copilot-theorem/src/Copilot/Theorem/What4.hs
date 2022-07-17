@@ -163,7 +163,7 @@ prove solver spec = do
             WS.Unknown -> return (CS.propertyName pr, Unknown)
 
   -- Execute the action and return the results for each property
-  runTransM sym spec proveProperties
+  runTransM spec proveProperties
   where
     expectedBool :: forall m sym a.
                     (Panic.HasCallStack, MonadIO m, WI.IsExprBuilder sym)

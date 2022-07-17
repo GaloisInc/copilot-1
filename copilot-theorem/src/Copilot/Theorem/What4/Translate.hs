@@ -407,42 +407,8 @@ translateOp1 :: forall sym a b.
 translateOp1 sym origExpr op xe = case (op, xe) of
   (CE.Not, XBool e) -> XBool <$> WI.notPred sym e
   (CE.Not, _) -> panic ["Expected bool", show xe]
-  (CE.Abs _, xe) -> numOp bvAbs fpAbs xe
-    where
-      bvAbs :: BVOp1 sym w
-      bvAbs e = do
-        zero <- WI.bvLit sym knownNat (BV.zero knownNat)
-        e_neg <- WI.bvSlt sym e zero
-        neg_e <- WI.bvSub sym zero e
-        WI.bvIte sym e_neg neg_e e
-
-      fpAbs :: FPOp1 sym fpp
-      fpAbs e = do
-        zero <- WI.floatLit sym knownRepr bfPosZero
-        e_neg <- WI.floatLt sym e zero
-        neg_e <- WI.floatSub sym fpRM zero e
-        WI.floatIte sym e_neg neg_e e
-  (CE.Sign _, xe) -> numOp bvSign fpSign xe
-    where
-      bvSign :: BVOp1 sym w
-      bvSign e = do
-        zero <- WI.bvLit sym knownRepr (BV.zero knownNat)
-        neg_one <- WI.bvLit sym knownNat (BV.mkBV knownNat (-1))
-        pos_one <- WI.bvLit sym knownNat (BV.mkBV knownNat 1)
-        e_zero <- WI.bvEq sym e zero
-        e_neg <- WI.bvSlt sym e zero
-        t <- WI.bvIte sym e_neg neg_one pos_one
-        WI.bvIte sym e_zero zero t
-
-      fpSign :: FPOp1 sym fpp
-      fpSign e = do
-        zero <- WI.floatLit sym knownRepr bfPosZero
-        neg_one <- WI.floatLit sym knownRepr (bfFromDouble (-1.0))
-        pos_one <- WI.floatLit sym knownRepr (bfFromDouble 1.0)
-        e_zero <- WI.floatEq sym e zero
-        e_neg <- WI.floatLt sym e zero
-        t <- WI.floatIte sym e_neg neg_one pos_one
-        WI.floatIte sym e_zero zero t
+  (CE.Abs _, xe) -> translateAbs xe
+  (CE.Sign _, xe) -> translateSign xe
   (CE.Recip _, xe) -> fpOp recip xe
     where
       recip :: FPOp1 sym fpp
@@ -467,53 +433,82 @@ translateOp1 sym origExpr op xe = case (op, xe) of
   (CE.BwNot _, xe) -> case xe of
     XBool e -> XBool <$> WI.notPred sym e
     _ -> bvOp (WI.bvNotBits sym) xe
-  (CE.Cast _ tp, xe) -> case (xe, tp) of
-    (XBool e, CT.Bool) -> return $ XBool e
-    (XBool e, CT.Word8) -> XWord8 <$> WI.predToBV sym e knownNat
-    (XBool e, CT.Word16) -> XWord16 <$> WI.predToBV sym e knownNat
-    (XBool e, CT.Word32) -> XWord32 <$> WI.predToBV sym e knownNat
-    (XBool e, CT.Word64) -> XWord64 <$> WI.predToBV sym e knownNat
-    (XBool e, CT.Int8) -> XInt8 <$> WI.predToBV sym e knownNat
-    (XBool e, CT.Int16) -> XInt16 <$> WI.predToBV sym e knownNat
-    (XBool e, CT.Int32) -> XInt32 <$> WI.predToBV sym e knownNat
-    (XBool e, CT.Int64) -> XInt64 <$> WI.predToBV sym e knownNat
-    (XInt8 e, CT.Int8) -> return $ XInt8 e
-    (XInt8 e, CT.Int16) -> XInt16 <$> WI.bvSext sym knownNat e
-    (XInt8 e, CT.Int32) -> XInt32 <$> WI.bvSext sym knownNat e
-    (XInt8 e, CT.Int64) -> XInt64 <$> WI.bvSext sym knownNat e
-    (XInt16 e, CT.Int16) -> return $ XInt16 e
-    (XInt16 e, CT.Int32) -> XInt32 <$> WI.bvSext sym knownNat e
-    (XInt16 e, CT.Int64) -> XInt64 <$> WI.bvSext sym knownNat e
-    (XInt32 e, CT.Int32) -> return $ XInt32 e
-    (XInt32 e, CT.Int64) -> XInt64 <$> WI.bvSext sym knownNat e
-    (XInt64 e, CT.Int64) -> return $ XInt64 e
-    (XWord8 e, CT.Int16) -> XInt16 <$> WI.bvZext sym knownNat e
-    (XWord8 e, CT.Int32) -> XInt32 <$> WI.bvZext sym knownNat e
-    (XWord8 e, CT.Int64) -> XInt64 <$> WI.bvZext sym knownNat e
-    (XWord8 e, CT.Word8) -> return $ XWord8 e
-    (XWord8 e, CT.Word16) -> XWord16 <$> WI.bvZext sym knownNat e
-    (XWord8 e, CT.Word32) -> XWord32 <$> WI.bvZext sym knownNat e
-    (XWord8 e, CT.Word64) -> XWord64 <$> WI.bvZext sym knownNat e
-    (XWord16 e, CT.Int32) -> XInt32 <$> WI.bvZext sym knownNat e
-    (XWord16 e, CT.Int64) -> XInt64 <$> WI.bvZext sym knownNat e
-    (XWord16 e, CT.Word16) -> return $ XWord16 e
-    (XWord16 e, CT.Word32) -> XWord32 <$> WI.bvZext sym knownNat e
-    (XWord16 e, CT.Word64) -> XWord64 <$> WI.bvZext sym knownNat e
-    (XWord32 e, CT.Int64) -> XInt64 <$> WI.bvZext sym knownNat e
-    (XWord32 e, CT.Word32) -> return $ XWord32 e
-    (XWord32 e, CT.Word64) -> XWord64 <$> WI.bvZext sym knownNat e
-    (XWord64 e, CT.Word64) -> return $ XWord64 e
-    _ -> panic ["Could not compute cast", show (CP.ppExpr origExpr), show xe]
-  (CE.GetField (CT.Struct s) _ftp extractor, XStruct xes) ->
-    case mIx of
-      Just ix -> return $ xes !! ix
-      Nothing -> panic ["Could not find field " ++ show fieldNameRepr, show s]
-    where
-      fieldNameRepr = fieldName (extractor undefined)
-      structFieldNameReprs = valueName <$> CT.toValues s
-      mIx = elemIndex (Some fieldNameRepr) structFieldNameReprs
-  (CE.GetField{}, _) -> unexpectedValue "get-field operation"
+  (CE.Cast _ tp, xe) -> castOp sym origExpr tp xe
+  (CE.GetField atp _ftp extractor, xe) -> translateGetField atp extractor xe
   where
+    -- Translate an 'CE.Abs' operation and its argument into a what4
+    -- representation of the appropriate type.
+    translateAbs :: XExpr sym -> IO (XExpr sym)
+    translateAbs xe = numOp bvAbs fpAbs xe
+      where
+        bvAbs :: BVOp1 sym w
+        bvAbs e = do
+          zero <- WI.bvLit sym knownNat (BV.zero knownNat)
+          e_neg <- WI.bvSlt sym e zero
+          neg_e <- WI.bvSub sym zero e
+          WI.bvIte sym e_neg neg_e e
+
+        fpAbs :: FPOp1 sym fpp
+        fpAbs e = do
+          zero <- WI.floatLit sym knownRepr bfPosZero
+          e_neg <- WI.floatLt sym e zero
+          neg_e <- WI.floatSub sym fpRM zero e
+          WI.floatIte sym e_neg neg_e e
+
+    -- Translate a 'CE.GetField' operation and its argument into a what4
+    -- representation. If the argument is not a struct, panic.
+    translateGetField :: forall struct s.
+                         KnownSymbol s
+                      => CT.Type struct
+                      -- ^ The type of the argument
+                      -> (struct -> CT.Field s b)
+                      -- ^ Extract a struct field
+                      -> XExpr sym
+                      -- ^ The argument value (should be a struct)
+                      -> IO (XExpr sym)
+    translateGetField tp extractor xe = case (tp, xe) of
+      (CT.Struct s, XStruct xes) ->
+        case mIx s of
+          Just ix -> return $ xes !! ix
+          Nothing -> panic [ "Could not find field " ++ show fieldNameRepr
+                           , show s
+                           ]
+      _ -> unexpectedValue "get-field operation"
+      where
+        fieldNameRepr :: SymbolRepr s
+        fieldNameRepr = fieldName (extractor undefined)
+
+        structFieldNameReprs :: CT.Struct struct => struct -> [Some SymbolRepr]
+        structFieldNameReprs s = valueName <$> CT.toValues s
+
+        mIx :: CT.Struct struct => struct -> Maybe Int
+        mIx s = elemIndex (Some fieldNameRepr) (structFieldNameReprs s)
+
+    -- Translate a 'CE.Sign' operation and its argument into a what4
+    -- representation of the appropriate type.
+    translateSign :: XExpr sym -> IO (XExpr sym)
+    translateSign xe = numOp bvSign fpSign xe
+      where
+        bvSign :: BVOp1 sym w
+        bvSign e = do
+          zero <- WI.bvLit sym knownRepr (BV.zero knownNat)
+          neg_one <- WI.bvLit sym knownNat (BV.mkBV knownNat (-1))
+          pos_one <- WI.bvLit sym knownNat (BV.mkBV knownNat 1)
+          e_zero <- WI.bvEq sym e zero
+          e_neg <- WI.bvSlt sym e zero
+          t <- WI.bvIte sym e_neg neg_one pos_one
+          WI.bvIte sym e_zero zero t
+
+        fpSign :: FPOp1 sym fpp
+        fpSign e = do
+          zero <- WI.floatLit sym knownRepr bfPosZero
+          neg_one <- WI.floatLit sym knownRepr (bfFromDouble (-1.0))
+          pos_one <- WI.floatLit sym knownRepr (bfFromDouble 1.0)
+          e_zero <- WI.floatEq sym e zero
+          e_neg <- WI.floatLt sym e zero
+          t <- WI.floatIte sym e_neg neg_one pos_one
+          WI.floatIte sym e_zero zero t
+
     -- Check the type of the argument. If the argument is a bitvector value,
     -- apply the 'BVOp1'. If the argument is a floating-point value, apply the
     -- 'FPOp1'. Otherwise, 'panic'.
@@ -667,22 +662,7 @@ translateOp2 sym origExpr powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
         WI.realToFloat sym knownRepr fpRM rpow
   (CE.Eq _, xe1, xe2) ->
     cmp (WI.eqPred sym) (WI.bvEq sym) (WI.floatEq sym) xe1 xe2
-  (CE.Ne _, xe1, xe2) -> cmp neqPred bvNeq fpNeq xe1 xe2
-    where
-      neqPred :: BoolCmp2 sym
-      neqPred e1 e2 = do
-        e <- WI.eqPred sym e1 e2
-        WI.notPred sym e
-
-      bvNeq :: forall w . BVCmp2 sym w
-      bvNeq e1 e2 = do
-        e <- WI.bvEq sym e1 e2
-        WI.notPred sym e
-
-      fpNeq :: forall fpp . FPCmp2 sym fpp
-      fpNeq e1 e2 = do
-        e <- WI.floatEq sym e1 e2
-        WI.notPred sym e
+  (CE.Ne _, xe1, xe2) -> translateNe xe1 xe2
   (CE.Le _, xe1, xe2) ->
     numCmp (WI.bvSle sym) (WI.bvUle sym) (WI.floatLe sym) xe1 xe2
   (CE.Ge _, xe1, xe2) ->
@@ -697,30 +677,8 @@ translateOp2 sym origExpr powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
     bvOp (WI.bvOrBits sym) (WI.bvOrBits sym) xe1 xe2
   (CE.BwXor _, xe1, xe2) ->
     bvOp (WI.bvXorBits sym) (WI.bvXorBits sym) xe1 xe2
-  -- Note: For both shift operators, we are interpreting the shifter as an
-  -- unsigned bitvector regardless of whether it is a word or an int.
-  (CE.BwShiftL _ _, xe1, xe2) -> do
-    -- These partial pattern matches on Just should always succeed because
-    -- BwShiftL should always have bitvectors as arguments.
-    Just (SomeBVExpr e1 w1 _ ctor1) <- return $ asBVExpr xe1
-    Just (SomeBVExpr e2 w2 _ _    ) <- return $ asBVExpr xe2
-    e2' <- case testNatCases w1 w2 of
-      NatCaseLT LeqProof -> WI.bvTrunc sym w1 e2
-      NatCaseEQ -> return e2
-      NatCaseGT LeqProof -> WI.bvZext sym w1 e2
-    ctor1 <$> WI.bvShl sym e1 e2'
-  (CE.BwShiftR _ _, xe1, xe2) -> do
-    -- These partial pattern matches on Just should always succeed because
-    -- BwShiftL should always have bitvectors as arguments.
-    Just (SomeBVExpr e1 w1 sgn1 ctor1) <- return $ asBVExpr xe1
-    Just (SomeBVExpr e2 w2 _    _    ) <- return $ asBVExpr xe2
-    e2' <- case testNatCases w1 w2 of
-      NatCaseLT LeqProof -> WI.bvTrunc sym w1 e2
-      NatCaseEQ -> return e2
-      NatCaseGT LeqProof -> WI.bvZext sym w1 e2
-    ctor1 <$> case sgn1 of
-      Signed -> WI.bvAshr sym e1 e2'
-      Unsigned -> WI.bvLshr sym e1 e2'
+  (CE.BwShiftL _ _, xe1, xe2) -> translateBwShiftL xe1 xe2
+  (CE.BwShiftR _ _, xe1, xe2) -> translateBwShiftR xe1 xe2
   -- Note: Currently, copilot does not check if array indices are out of bounds,
   -- even for constant expressions. The method of translation we are using
   -- simply creates a nest of if-then-else expression to check the index
@@ -730,9 +688,65 @@ translateOp2 sym origExpr powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
   -- true.
   (CE.Index _, xe1, xe2) ->
     case (xe1, xe2) of
-      (XArray xes, XWord32 ix) -> buildIndexExpr sym 0 ix xes
+      (XArray xes, XWord32 ix) -> buildIndexExpr sym ix xes
       _ -> unexpectedValues "index operation"
   where
+    -- Translate an 'CE.Ne' operation and its arguments into a what4
+    -- representation of the appropriate type.
+    translateNe :: XExpr sym -> XExpr sym -> IO (XExpr sym)
+    translateNe xe1 xe2 = cmp neqPred bvNeq fpNeq xe1 xe2
+      where
+        neqPred :: BoolCmp2 sym
+        neqPred e1 e2 = do
+          e <- WI.eqPred sym e1 e2
+          WI.notPred sym e
+
+        bvNeq :: forall w . BVCmp2 sym w
+        bvNeq e1 e2 = do
+          e <- WI.bvEq sym e1 e2
+          WI.notPred sym e
+
+        fpNeq :: forall fpp . FPCmp2 sym fpp
+        fpNeq e1 e2 = do
+          e <- WI.floatEq sym e1 e2
+          WI.notPred sym e
+
+    -- Translate a 'CE.BwShiftL' operation and its arguments into a what4
+    -- representation.
+    --
+    -- Note: we are interpreting the shifter as an unsigned bitvector regardless
+    -- of whether it is a word or an int.
+    translateBwShiftL :: XExpr sym -> XExpr sym -> IO (XExpr sym)
+    translateBwShiftL xe1 xe2 = do
+      -- These partial pattern matches on Just should always succeed because
+      -- BwShiftL should always have bitvectors as arguments.
+      Just (SomeBVExpr e1 w1 _ ctor1) <- return $ asBVExpr xe1
+      Just (SomeBVExpr e2 w2 _ _    ) <- return $ asBVExpr xe2
+      e2' <- case testNatCases w1 w2 of
+        NatCaseLT LeqProof -> WI.bvTrunc sym w1 e2
+        NatCaseEQ -> return e2
+        NatCaseGT LeqProof -> WI.bvZext sym w1 e2
+      ctor1 <$> WI.bvShl sym e1 e2'
+
+    -- Translate a 'CE.BwShiftL' operation and its arguments into a what4
+    -- representation.
+    --
+    -- Note: we are interpreting the shifter as an unsigned bitvector regardless
+    -- of whether it is a word or an int.
+    translateBwShiftR :: XExpr sym -> XExpr sym -> IO (XExpr sym)
+    translateBwShiftR xe1 xe2 = do
+      -- These partial pattern matches on Just should always succeed because
+      -- BwShiftL should always have bitvectors as arguments.
+      Just (SomeBVExpr e1 w1 sgn1 ctor1) <- return $ asBVExpr xe1
+      Just (SomeBVExpr e2 w2 _    _    ) <- return $ asBVExpr xe2
+      e2' <- case testNatCases w1 w2 of
+        NatCaseLT LeqProof -> WI.bvTrunc sym w1 e2
+        NatCaseEQ -> return e2
+        NatCaseGT LeqProof -> WI.bvZext sym w1 e2
+      ctor1 <$> case sgn1 of
+        Signed -> WI.bvAshr sym e1 e2'
+        Unsigned -> WI.bvLshr sym e1 e2'
+
     -- Check the types of the arguments. If the arguments are bitvector values,
     -- apply the 'BVOp2'. If the arguments are floating-point values, apply the
     -- 'FPOp2'. Otherwise, 'panic'.
@@ -828,58 +842,6 @@ translateOp2 sym origExpr powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
       (XDouble e1, XDouble e2) -> XBool <$> fpOp e1 e2
       _ -> unexpectedValues "numCmp"
 
-    -- Construct an expression that indexes into an array by building a chain of
-    -- @if@ expressions, where each expression checks if the current index is
-    -- equal to a given index in the array. If the indices are equal, return the
-    -- element of the array at that index. Otherwise, proceed to the next @if@
-    -- expression, which checks the next index in the array.
-    buildIndexExpr :: 1 <= n
-                   => sym
-                   -> Word32
-                   -- ^ Index
-                   -> WI.SymBV sym 32
-                   -- ^ Index
-                   -> V.Vector n (XExpr sym)
-                   -- ^ Elements
-                   -> IO (XExpr sym)
-    buildIndexExpr sym curIx ix xelts = case V.uncons xelts of
-      (xe, Left Refl) -> return xe
-      (xe, Right xelts') -> do
-        LeqProof <- return $ V.nonEmpty xelts'
-        rstExpr <- buildIndexExpr sym (curIx+1) ix xelts'
-        curIxExpr <- WI.bvLit sym knownNat (BV.word32 curIx)
-        ixEq <- WI.bvEq sym curIxExpr ix
-        mkIte sym ixEq xe rstExpr
-
-    -- Construct an @if@ expression of the appropriate type.
-    mkIte :: sym
-          -> WI.Pred sym
-          -> XExpr sym
-          -> XExpr sym
-          -> IO (XExpr sym)
-    mkIte sym pred xe1 xe2 = case (xe1, xe2) of
-          (XBool e1, XBool e2) -> XBool <$> WI.itePred sym pred e1 e2
-          (XInt8 e1, XInt8 e2) -> XInt8 <$> WI.bvIte sym pred e1 e2
-          (XInt16 e1, XInt16 e2) -> XInt16 <$> WI.bvIte sym pred e1 e2
-          (XInt32 e1, XInt32 e2) -> XInt32 <$> WI.bvIte sym pred e1 e2
-          (XInt64 e1, XInt64 e2) -> XInt64 <$> WI.bvIte sym pred e1 e2
-          (XWord8 e1, XWord8 e2) -> XWord8 <$> WI.bvIte sym pred e1 e2
-          (XWord16 e1, XWord16 e2) -> XWord16 <$> WI.bvIte sym pred e1 e2
-          (XWord32 e1, XWord32 e2) -> XWord32 <$> WI.bvIte sym pred e1 e2
-          (XWord64 e1, XWord64 e2) -> XWord64 <$> WI.bvIte sym pred e1 e2
-          (XFloat e1, XFloat e2) -> XFloat <$> WI.floatIte sym pred e1 e2
-          (XDouble e1, XDouble e2) -> XDouble <$> WI.floatIte sym pred e1 e2
-          (XStruct xes1, XStruct xes2) ->
-            XStruct <$> zipWithM (mkIte sym pred) xes1 xes2
-          (XArray xes1, XArray xes2) ->
-            case V.length xes1 `testEquality` V.length xes2 of
-              Just Refl -> XArray <$> V.zipWithM (mkIte sym pred) xes1 xes2
-              Nothing -> panic [ "Array length mismatch in ite"
-                               , show (V.length xes1)
-                               , show (V.length xes2)
-                               ]
-          _ -> panic ["Unexpected values in ite", show xe1, show xe2]
-
     -- A catch-all error message to use when translation cannot proceed.
     unexpectedValues :: forall m x.
                         (Panic.HasCallStack, MonadIO m)
@@ -903,21 +865,9 @@ translateOp3 :: forall sym a b c d.
              -> XExpr sym
              -> XExpr sym
              -> IO (XExpr sym)
-translateOp3 sym _origExpr (CE.Mux _) (XBool te) xe1 xe2 = case (xe1, xe2) of
-  (XBool e1, XBool e2) -> XBool <$> WI.itePred sym te e1 e2
-  (XInt8 e1, XInt8 e2) -> XInt8 <$> WI.bvIte sym te e1 e2
-  (XInt16 e1, XInt16 e2) -> XInt16 <$> WI.bvIte sym te e1 e2
-  (XInt32 e1, XInt32 e2) -> XInt32 <$> WI.bvIte sym te e1 e2
-  (XInt64 e1, XInt64 e2) -> XInt64 <$> WI.bvIte sym te e1 e2
-  (XWord8 e1, XWord8 e2) -> XWord8 <$> WI.bvIte sym te e1 e2
-  (XWord16 e1, XWord16 e2) -> XWord16 <$> WI.bvIte sym te e1 e2
-  (XWord32 e1, XWord32 e2) -> XWord32 <$> WI.bvIte sym te e1 e2
-  (XWord64 e1, XWord64 e2) -> XWord64 <$> WI.bvIte sym te e1 e2
-  (XFloat e1, XFloat e2) -> XFloat <$> WI.floatIte sym te e1 e2
-  (XDouble e1, XDouble e2) -> XDouble <$> WI.floatIte sym te e1 e2
-  _ -> panic ["Unexpected values in ite", show xe1, show xe2]
-translateOp3 _ origExpr (CE.Mux _) xe1 xe2 xe3 =
-  unexpectedValues "mux operation"
+translateOp3 sym origExpr op xe1 xe2 xe3 = case (op, xe1, xe2, xe3) of
+  (CE.Mux _, XBool te, xe1, xe2) -> liftIO $ mkIte sym te xe1 xe2
+  (CE.Mux _, _, _, _) -> unexpectedValues "mux operation"
   where
     unexpectedValues :: forall m x. (Panic.HasCallStack, MonadIO m) =>
                         String -> m x
@@ -925,6 +875,120 @@ translateOp3 _ origExpr (CE.Mux _) xe1 xe2 xe3 =
       panic [ "Unexpected values in " ++ op ++ ":"
             , show (CP.ppExpr origExpr), show xe1, show xe2, show xe3
             ]
+
+-- | Construct an expression that indexes into an array by building a chain of
+-- @if@ expressions, where each expression checks if the current index is equal
+-- to a given index in the array. If the indices are equal, return the element
+-- of the array at that index. Otherwise, proceed to the next @if@ expression,
+-- which checks the next index in the array.
+buildIndexExpr :: forall sym n.
+                  (1 <= n, WI.IsExprBuilder sym)
+               => sym
+               -> WI.SymBV sym 32
+               -- ^ Index
+               -> V.Vector n (XExpr sym)
+               -- ^ Elements
+               -> IO (XExpr sym)
+buildIndexExpr sym ix = loop 0
+  where
+    loop :: forall n'.
+            (1 <= n')
+         => Word32
+         -> V.Vector n' (XExpr sym)
+         -> IO (XExpr sym)
+    loop curIx xelts = case V.uncons xelts of
+      -- Base case, exactly one element left
+      (xe, Left Refl) -> return xe
+      -- Recursive case
+      (xe, Right xelts') -> do
+        LeqProof <- return $ V.nonEmpty xelts'
+        rstExpr <- loop (curIx+1) xelts'
+        curIxExpr <- WI.bvLit sym knownNat (BV.word32 curIx)
+        ixEq <- WI.bvEq sym curIxExpr ix
+        mkIte sym ixEq xe rstExpr
+
+-- | Construct an @if@ expression of the appropriate type.
+mkIte :: WI.IsExprBuilder sym
+      => sym
+      -> WI.Pred sym
+      -> XExpr sym
+      -> XExpr sym
+      -> IO (XExpr sym)
+mkIte sym pred xe1 xe2 = case (xe1, xe2) of
+  (XBool e1, XBool e2) -> XBool <$> WI.itePred sym pred e1 e2
+  (XInt8 e1, XInt8 e2) -> XInt8 <$> WI.bvIte sym pred e1 e2
+  (XInt16 e1, XInt16 e2) -> XInt16 <$> WI.bvIte sym pred e1 e2
+  (XInt32 e1, XInt32 e2) -> XInt32 <$> WI.bvIte sym pred e1 e2
+  (XInt64 e1, XInt64 e2) -> XInt64 <$> WI.bvIte sym pred e1 e2
+  (XWord8 e1, XWord8 e2) -> XWord8 <$> WI.bvIte sym pred e1 e2
+  (XWord16 e1, XWord16 e2) -> XWord16 <$> WI.bvIte sym pred e1 e2
+  (XWord32 e1, XWord32 e2) -> XWord32 <$> WI.bvIte sym pred e1 e2
+  (XWord64 e1, XWord64 e2) -> XWord64 <$> WI.bvIte sym pred e1 e2
+  (XFloat e1, XFloat e2) -> XFloat <$> WI.floatIte sym pred e1 e2
+  (XDouble e1, XDouble e2) -> XDouble <$> WI.floatIte sym pred e1 e2
+  (XStruct xes1, XStruct xes2) ->
+    XStruct <$> zipWithM (mkIte sym pred) xes1 xes2
+  (XEmptyArray, XEmptyArray) -> return XEmptyArray
+  (XArray xes1, XArray xes2) ->
+    case V.length xes1 `testEquality` V.length xes2 of
+      Just Refl -> XArray <$> V.zipWithM (mkIte sym pred) xes1 xes2
+      Nothing -> panic [ "Array length mismatch in ite"
+                       , show (V.length xes1)
+                       , show (V.length xes2)
+                       ]
+  _ -> panic ["Unexpected values in ite", show xe1, show xe2]
+
+-- | Cast an 'XExpr' to another 'XExpr' of a possibly differing type.
+castOp :: WI.IsExprBuilder sym
+       => sym
+       -> CE.Expr b
+       -- ^ Original value we are translating (only used for error
+       -- messages)
+       -> CT.Type a
+       -- ^ Type we are casting to
+       -> XExpr sym
+       -- ^ Value to cast
+       -> IO (XExpr sym)
+castOp sym origExpr tp xe = case (xe, tp) of
+  (XBool _, CT.Bool)     -> return xe
+  (XBool e, CT.Word8)    -> XWord8  <$> WI.predToBV sym e knownNat
+  (XBool e, CT.Word16)   -> XWord16 <$> WI.predToBV sym e knownNat
+  (XBool e, CT.Word32)   -> XWord32 <$> WI.predToBV sym e knownNat
+  (XBool e, CT.Word64)   -> XWord64 <$> WI.predToBV sym e knownNat
+  (XBool e, CT.Int8)     -> XInt8   <$> WI.predToBV sym e knownNat
+  (XBool e, CT.Int16)    -> XInt16  <$> WI.predToBV sym e knownNat
+  (XBool e, CT.Int32)    -> XInt32  <$> WI.predToBV sym e knownNat
+  (XBool e, CT.Int64)    -> XInt64  <$> WI.predToBV sym e knownNat
+
+  (XInt8 _, CT.Int8)     -> return xe
+  (XInt8 e, CT.Int16)    -> XInt16  <$> WI.bvSext sym knownNat e
+  (XInt8 e, CT.Int32)    -> XInt32  <$> WI.bvSext sym knownNat e
+  (XInt8 e, CT.Int64)    -> XInt64  <$> WI.bvSext sym knownNat e
+  (XInt16 _, CT.Int16)   -> return xe
+  (XInt16 e, CT.Int32)   -> XInt32  <$> WI.bvSext sym knownNat e
+  (XInt16 e, CT.Int64)   -> XInt64  <$> WI.bvSext sym knownNat e
+  (XInt32 _, CT.Int32)   -> return xe
+  (XInt32 e, CT.Int64)   -> XInt64  <$> WI.bvSext sym knownNat e
+  (XInt64 _, CT.Int64)   -> return xe
+
+  (XWord8 e, CT.Int16)   -> XInt16  <$> WI.bvZext sym knownNat e
+  (XWord8 e, CT.Int32)   -> XInt32  <$> WI.bvZext sym knownNat e
+  (XWord8 e, CT.Int64)   -> XInt64  <$> WI.bvZext sym knownNat e
+  (XWord8 _, CT.Word8)   -> return xe
+  (XWord8 e, CT.Word16)  -> XWord16 <$> WI.bvZext sym knownNat e
+  (XWord8 e, CT.Word32)  -> XWord32 <$> WI.bvZext sym knownNat e
+  (XWord8 e, CT.Word64)  -> XWord64 <$> WI.bvZext sym knownNat e
+  (XWord16 e, CT.Int32)  -> XInt32  <$> WI.bvZext sym knownNat e
+  (XWord16 e, CT.Int64)  -> XInt64  <$> WI.bvZext sym knownNat e
+  (XWord16 _, CT.Word16) -> return xe
+  (XWord16 e, CT.Word32) -> XWord32 <$> WI.bvZext sym knownNat e
+  (XWord16 e, CT.Word64) -> XWord64 <$> WI.bvZext sym knownNat e
+  (XWord32 e, CT.Int64)  -> XInt64  <$> WI.bvZext sym knownNat e
+  (XWord32 _, CT.Word32) -> return xe
+  (XWord32 e, CT.Word64) -> XWord64 <$> WI.bvZext sym knownNat e
+  (XWord64 _, CT.Word64) -> return xe
+
+  _ -> panic ["Could not compute cast", show (CP.ppExpr origExpr), show xe]
 
 -- What4 representations of Copilot expressions
 

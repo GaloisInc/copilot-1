@@ -30,12 +30,11 @@ module Copilot.Theorem.What4.Translate
   ) where
 
 import           Control.Monad                 (forM, zipWithM, (<=<))
-import qualified Control.Monad.Fail            as Fail
 import           Control.Monad.IO.Class        (MonadIO (..))
 import           Control.Monad.State           (MonadState (..), StateT (..),
                                                 gets, modify)
 import qualified Data.BitVector.Sized          as BV
-import           Data.List                     (elemIndex)
+import           Data.List                     (elemIndex, genericLength)
 import qualified Data.Map                      as Map
 import           Data.Maybe                    (fromJust)
 import           Data.Parameterized.Classes    (KnownRepr (..))
@@ -44,7 +43,7 @@ import           Data.Parameterized.Context    (EmptyCtx, pattern (:>),
 import           Data.Parameterized.NatRepr    (LeqProof (..), NatCases (..),
                                                 NatRepr, decNat, isZeroOrGT1,
                                                 knownNat, minusPlusCancel,
-                                                someNat, testNatCases)
+                                                mkNatRepr, testNatCases)
 import           Data.Parameterized.Some       (Some (..))
 import           Data.Parameterized.SymbolRepr (SymbolRepr, knownSymbol)
 import qualified Data.Parameterized.Vector     as V
@@ -112,12 +111,10 @@ newtype TransM sym a = TransM { unTransM :: StateT (TransState sym) IO a }
   deriving ( Functor
            , Applicative
            , Monad
+           , MonadFail
            , MonadIO
            , MonadState (TransState sym)
            )
-
-instance Fail.MonadFail (TransM sym) where
-  fail = error
 
 -- | Translate an expression into a what4 representation. The int offset keeps
 -- track of how many timesteps into the past each variable is referring to.
@@ -253,7 +250,7 @@ translateConstExpr sym tp a = case tp of
   CT.Double -> XDouble <$> WI.floatLit sym knownRepr (bfFromDouble a)
   CT.Array tp -> do
     elts <- traverse (translateConstExpr sym tp) (CT.arrayelems a)
-    Just (Some n) <- return $ someNat (length elts)
+    Some n <- return $ mkNatRepr (genericLength elts)
     case isZeroOrGT1 n of
       Left Refl -> return XEmptyArray
       Right LeqProof ->
@@ -678,6 +675,8 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
   -- Note: For both shift operators, we are interpreting the shifter as an
   -- unsigned bitvector regardless of whether it is a word or an int.
   (CE.BwShiftL _ _, xe1, xe2) -> do
+    -- These partial pattern matches on Just should always succeed because
+    -- BwShiftL should always have bitvectors as arguments.
     Just (SomeBVExpr e1 w1 _ ctor1) <- return $ asBVExpr xe1
     Just (SomeBVExpr e2 w2 _ _    ) <- return $ asBVExpr xe2
     e2' <- case testNatCases w1 w2 of
@@ -686,6 +685,8 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
       NatCaseGT LeqProof -> WI.bvZext sym w1 e2
     ctor1 <$> WI.bvShl sym e1 e2'
   (CE.BwShiftR _ _, xe1, xe2) -> do
+    -- These partial pattern matches on Just should always succeed because
+    -- BwShiftL should always have bitvectors as arguments.
     Just (SomeBVExpr e1 w1 sgn1 ctor1) <- return $ asBVExpr xe1
     Just (SomeBVExpr e2 w2 _    _    ) <- return $ asBVExpr xe2
     e2' <- case testNatCases w1 w2 of

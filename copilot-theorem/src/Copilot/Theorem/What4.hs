@@ -137,9 +137,15 @@ prove solver spec = do
         let bufLen (CS.Stream _ buf _ _) = length buf
             maxBufLen = maximum (0 : (bufLen <$> CS.specStreams spec))
         prefix <- forM [0 .. maxBufLen - 1] $ \k -> do
-          XBool p <- translateExprAt sym k (CS.propertyExpr pr)
-          return p
-        XBool p <- translateExpr sym 0 (CS.propertyExpr pr)
+          xe <- translateExprAt sym k (CS.propertyExpr pr)
+          case xe of
+            XBool p -> return p
+            _ -> expectedBool xe
+        p <- do
+          xe <- translateExpr sym 0 (CS.propertyExpr pr)
+          case xe of
+            XBool p -> return p
+            _ -> expectedBool xe
         p_and_prefix <- liftIO $ foldrM (WI.andPred sym) p prefix
         not_p_and_prefix <- liftIO $ WI.notPred sym p_and_prefix
 
@@ -165,6 +171,13 @@ prove solver spec = do
   -- Execute the action and return the results for each property
   (res, _) <- runStateT (unTransM proveProperties) st
   return res
+  where
+    expectedBool :: forall m sym a.
+                    (MonadFail m, WI.IsExprBuilder sym)
+                 => XExpr sym
+                 -> m a
+    expectedBool xe =
+      fail $ unlines ["Property expected to have boolean result", show xe]
 
 data CopilotValue a = CopilotValue { cvType :: CT.Type a
                                    , cvVal :: a

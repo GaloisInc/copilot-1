@@ -971,6 +971,7 @@ castOp :: WI.IsExprBuilder sym
        -- ^ Value to cast
        -> IO (XExpr sym)
 castOp sym origExpr tp xe = case (xe, tp) of
+  -- "safe" casts that cannot lose information
   (XBool _, CT.Bool)     -> return xe
   (XBool e, CT.Word8)    -> XWord8  <$> WI.predToBV sym e knownNat
   (XBool e, CT.Word16)   -> XWord16 <$> WI.predToBV sym e knownNat
@@ -1008,6 +1009,35 @@ castOp sym origExpr tp xe = case (xe, tp) of
   (XWord32 _, CT.Word32) -> return xe
   (XWord32 e, CT.Word64) -> XWord64 <$> WI.bvZext sym knownNat e
   (XWord64 _, CT.Word64) -> return xe
+
+  -- "unsafe" casts, which may lose information
+  -- unsigned truncations
+  (XWord64 e, CT.Word32) -> XWord32 <$> WI.bvTrunc sym knownNat e
+  (XWord64 e, CT.Word16) -> XWord16 <$> WI.bvTrunc sym knownNat e
+  (XWord64 e, CT.Word8)  -> XWord8  <$> WI.bvTrunc sym knownNat e
+  (XWord32 e, CT.Word16) -> XWord16 <$> WI.bvTrunc sym knownNat e
+  (XWord32 e, CT.Word8)  -> XWord8  <$> WI.bvTrunc sym knownNat e
+  (XWord16 e, CT.Word8)  -> XWord8  <$> WI.bvTrunc sym knownNat e
+
+  -- signed truncations
+  (XInt64 e, CT.Int32)   -> XInt32  <$> WI.bvTrunc sym knownNat e
+  (XInt64 e, CT.Int16)   -> XInt16  <$> WI.bvTrunc sym knownNat e
+  (XInt64 e, CT.Int8)    -> XInt8   <$> WI.bvTrunc sym knownNat e
+  (XInt32 e, CT.Int16)   -> XInt16  <$> WI.bvTrunc sym knownNat e
+  (XInt32 e, CT.Int8)    -> XInt8   <$> WI.bvTrunc sym knownNat e
+  (XInt16 e, CT.Int8)    -> XInt8   <$> WI.bvTrunc sym knownNat e
+
+  -- unsigned to signed conversion
+  (XWord64 e, CT.Int64)  -> return $ XInt64 e
+  (XWord32 e, CT.Int32)  -> return $ XInt32 e
+  (XWord16 e, CT.Int16)  -> return $ XInt16 e
+  (XWord8 e,  CT.Int8)   -> return $ XInt8 e
+
+  -- signed to unsigned conversion
+  (XInt64 e, CT.Word64)  -> return $ XWord64 e
+  (XInt32 e, CT.Word32)  -> return $ XWord32 e
+  (XInt16 e, CT.Word16)  -> return $ XWord16 e
+  (XInt8 e, CT.Word8)    -> return $ XWord8 e
 
   _ -> panic ["Could not compute cast", show (CP.ppExpr origExpr), show xe]
 

@@ -56,7 +56,6 @@ import           LibBF                         (bfFromDouble, bfPosZero)
 import qualified Panic                         as Panic
 
 import qualified What4.BaseTypes               as WT
-import qualified What4.Expr.Builder            as WB
 import qualified What4.Interface               as WI
 
 import qualified Copilot.Core.Expr             as CE
@@ -80,44 +79,44 @@ import qualified Copilot.Core.Type.Array       as CT
 -- translation and are never modified. They are the map from stream ids to the
 -- core stream definitions, a symbolic uninterpreted function for "pow", and a
 -- symbolic uninterpreted function for "logb".
-data TransState t = TransState {
+data TransState sym = TransState {
   -- | Map of all external variables we encounter during translation. These are
   -- just fresh constants. The offset indicates how many timesteps in the past
   -- this constant represents for that stream.
-  externVars :: Map.Map (CE.Name, Int) (XExpr t),
+  externVars :: Map.Map (CE.Name, Int) (XExpr sym),
   -- | Map of external variables at specific indices (positive), rather than
   -- offset into the past. This is for interpreting streams at specific offsets.
-  externVarsAt :: Map.Map (CE.Name, Int) (XExpr t),
+  externVarsAt :: Map.Map (CE.Name, Int) (XExpr sym),
   -- | Map from (stream id, negative offset) to fresh constant. These are all
   -- constants representing the values of a stream at some point in the past.
   -- The offset (ALWAYS NEGATIVE) indicates how many timesteps in the past
   -- this constant represents for that stream.
-  streamConstants :: Map.Map (CE.Id, Int) (XExpr t),
+  streamConstants :: Map.Map (CE.Id, Int) (XExpr sym),
   -- | Map from stream ids to the streams themselves. This value is never
   -- modified, but I didn't want to make this an RWS, so it's represented as a
   -- stateful value.
   streams :: Map.Map CE.Id CS.Stream,
   -- | Binary power operator, represented as an uninterpreted function.
-  pow :: WB.ExprSymFn t
+  pow :: WI.SymFn sym
          (EmptyCtx ::> WT.BaseRealType ::> WT.BaseRealType)
          WT.BaseRealType,
   -- | Binary logarithm operator, represented as an uninterpreted function.
-  logb :: WB.ExprSymFn t
+  logb :: WI.SymFn sym
           (EmptyCtx ::> WT.BaseRealType ::> WT.BaseRealType)
           WT.BaseRealType
   }
 
 -- | A monad that tracks state needed when translating Copilot specifications to
 -- What4 formulas.
-newtype TransM t a = TransM { unTransM :: StateT (TransState t) IO a }
+newtype TransM sym a = TransM { unTransM :: StateT (TransState sym) IO a }
   deriving ( Functor
            , Applicative
            , Monad
            , MonadIO
-           , MonadState (TransState t)
+           , MonadState (TransState sym)
            )
 
-instance Fail.MonadFail (TransM t) where
+instance Fail.MonadFail (TransM sym) where
   fail = error
 
 -- | Translate an expression into a what4 representation. The int offset keeps
@@ -125,12 +124,13 @@ instance Fail.MonadFail (TransM t) where
 -- Initially the value should be zero, but when we translate a stream, the
 -- offset is recomputed based on the length of that stream's prefix (subtracted)
 -- and the drop index (added).
-translateExpr :: WB.ExprBuilder t st fs
+translateExpr :: WI.IsSymExprBuilder sym
+              => sym
               -> Int
               -- ^ number of timesteps in the past we are currently looking
               -- (must always be <= 0)
               -> CE.Expr a
-              -> TransM t (XExpr t)
+              -> TransM sym (XExpr sym)
 translateExpr sym offset e = case e of
   CE.Const tp a -> liftIO $ translateConstExpr sym tp a
   CE.Drop _tp ix streamId
@@ -164,12 +164,13 @@ translateExpr sym offset e = case e of
 
 -- | Translate an expression into a what4 representation at a /specific/
 -- timestep, rather than "at some indeterminate point in the future."
-translateExprAt :: WB.ExprBuilder t st fs
+translateExprAt :: WI.IsSymExprBuilder sym
+                => sym
                 -> Int
                 -- ^ Index of timestep
                 -> CE.Expr a
                 -- ^ stream expression
-                -> TransM t (XExpr t)
+                -> TransM sym (XExpr sym)
 translateExprAt sym k e =
   case e of
     CE.Const tp a -> liftIO $ translateConstExpr sym tp a
@@ -201,13 +202,14 @@ translateExprAt sym k e =
 -- signed/unsigned status, and the constructor used to reconstruct an XExpr from
 -- it. This is a useful view for translation, as many of the operations can be
 -- grouped together for all words\/ints\/floats.
-data SomeBVExpr t where
-  SomeBVExpr :: 1 <= w
-             => WB.BVExpr t w
-             -> NatRepr w
-             -> BVSign
-             -> (WB.BVExpr t w -> XExpr t)
-             -> SomeBVExpr t
+data SomeBVExpr sym where
+  SomeBVExpr ::
+    1 <= w =>
+    WI.SymBV sym w ->
+    NatRepr w ->
+    BVSign ->
+    (WI.SymBV sym w -> XExpr sym) ->
+    SomeBVExpr sym
 
 -- | The sign of a bitvector -- this indicates whether it is to be interpreted
 -- as a signed 'Int' or an unsigned 'Word'.
@@ -215,7 +217,7 @@ data BVSign = Signed | Unsigned
 
 -- | If the inner expression can be viewed as a bitvector, we project out a view
 -- of it as such.
-asBVExpr :: XExpr t -> Maybe (SomeBVExpr t)
+asBVExpr :: XExpr sym -> Maybe (SomeBVExpr sym)
 asBVExpr xe = case xe of
   XInt8 e -> Just (SomeBVExpr e knownNat Signed XInt8)
   XInt16 e -> Just (SomeBVExpr e knownNat Signed XInt16)
@@ -229,11 +231,12 @@ asBVExpr xe = case xe of
 
 -- | Translate a constant expression by creating a what4 literal and packaging
 -- it up into an 'XExpr'.
-translateConstExpr :: forall a t st fs .
-                      WB.ExprBuilder t st fs
+translateConstExpr :: forall sym a.
+                      WI.IsExprBuilder sym
+                   => sym
                    -> CT.Type a
                    -> a
-                   -> IO (XExpr t)
+                   -> IO (XExpr sym)
 translateConstExpr sym tp a = case tp of
   CT.Bool -> case a of
     True  -> return $ XBool (WI.truePred sym)
@@ -269,11 +272,12 @@ arrayLen _ = knownNat
 -- whenever we attempt to get the constant for a given external variable or
 -- stream variable, but that variable has not been accessed yet and therefore
 -- has no constant allocated.
-freshCPConstant :: forall t st fs a .
-                   WB.ExprBuilder t st fs
+freshCPConstant :: forall sym a.
+                   WI.IsSymExprBuilder sym
+                => sym
                 -> String
                 -> CT.Type a
-                -> IO (XExpr t)
+                -> IO (XExpr sym)
 freshCPConstant sym nm tp = case tp of
   CT.Bool -> XBool <$> WI.freshConstant sym (WI.safeSymbol nm) knownRepr
   CT.Int8 -> XInt8 <$> WI.freshConstant sym (WI.safeSymbol nm) knownRepr
@@ -305,10 +309,11 @@ freshCPConstant sym nm tp = case tp of
 -- gets called for the first time for a given (streamId, offset) pair, it
 -- generates a fresh constant and stores it in an internal map. Thereafter, this
 -- function will just return that constant when called with the same pair.
-getStreamConstant :: WB.ExprBuilder t st fs
+getStreamConstant :: WI.IsSymExprBuilder sym
+                  => sym
                   -> CE.Id
                   -> Int
-                  -> TransM t (XExpr t)
+                  -> TransM sym (XExpr sym)
 getStreamConstant sym streamId offset = do
   scs <- gets streamConstants
   case Map.lookup (streamId, offset) scs of
@@ -327,11 +332,12 @@ getStreamConstant sym streamId offset = do
 -- function gets called for the first time for a given (var, offset) pair, it
 -- generates a fresh constant and stores it in an internal map. Thereafter, this
 -- function will just return that constant when called with the same pair.
-getExternConstant :: WB.ExprBuilder t st fs
+getExternConstant :: WI.IsSymExprBuilder sym
+                  => sym
                   -> CT.Type a
                   -> CE.Name
                   -> Int
-                  -> TransM t (XExpr t)
+                  -> TransM sym (XExpr sym)
 getExternConstant sym tp var offset = do
   es <- gets externVars
   case Map.lookup (var, offset) es of
@@ -342,11 +348,12 @@ getExternConstant sym tp var offset = do
       return xe
 
 -- | Get the constant for a given external variable at some specific timestep.
-getExternConstantAt :: WB.ExprBuilder t st fs
+getExternConstantAt :: WI.IsSymExprBuilder sym
+                    => sym
                     -> CT.Type a
                     -> CE.Name
                     -> Int
-                    -> TransM t (XExpr t)
+                    -> TransM sym (XExpr sym)
 getExternConstantAt sym tp var ix = do
   es <- gets externVarsAt
   case Map.lookup (var, ix) es of
@@ -357,20 +364,22 @@ getExternConstantAt sym tp var ix = do
       return xe
 
 -- | Retrieve a stream definition given its id.
-getStreamDef :: CE.Id -> TransM t CS.Stream
+getStreamDef :: CE.Id -> TransM sym CS.Stream
 getStreamDef streamId = fromJust <$> gets (Map.lookup streamId . streams)
 
 -- | A unary operation over bitvector values.
-type BVOp1 w t = (KnownNat w, 1 <= w) => WB.BVExpr t w -> IO (WB.BVExpr t w)
+type BVOp1 sym w = (KnownNat w, 1 <= w) => WI.SymBV sym w -> IO (WI.SymBV sym w)
 
 -- | A unary operation over floating-point values.
-type FPOp1 fpp t =
-    KnownRepr WT.FloatPrecisionRepr fpp
- => WB.Expr t (WT.BaseFloatType fpp)
- -> IO (WB.Expr t (WT.BaseFloatType fpp))
+type FPOp1 sym fpp =
+     KnownRepr WT.FloatPrecisionRepr fpp
+  => WI.SymExpr sym (WT.BaseFloatType fpp)
+  -> IO (WI.SymExpr sym (WT.BaseFloatType fpp))
 
 -- | A unary operation over real number values.
-type RealOp1 t = WB.Expr t WT.BaseRealType -> IO (WB.Expr t WT.BaseRealType)
+type RealOp1 sym =
+     WI.SymExpr sym WT.BaseRealType
+  -> IO (WI.SymExpr sym WT.BaseRealType)
 
 -- | Retrieve a 'CT.Field' name as a 'SymbolRepr'.
 fieldName :: KnownSymbol s => CT.Field s a -> SymbolRepr s
@@ -382,24 +391,25 @@ valueName (CT.Value _ f) = Some (fieldName f)
 
 -- | Translate a unary operation and its argument into a what4 representation of
 -- the operation applied to the argument.
-translateOp1 :: forall t st fs a b .
-                WB.ExprBuilder t st fs
+translateOp1 :: forall sym a b.
+                WI.IsExprBuilder sym
+             => sym
              -> CE.Op1 a b
-             -> XExpr t
-             -> IO (XExpr t)
+             -> XExpr sym
+             -> IO (XExpr sym)
 translateOp1 sym op xe = case (op, xe) of
   (CE.Not, XBool e) -> XBool <$> WI.notPred sym e
   (CE.Not, _) -> panic
   (CE.Abs _, xe) -> numOp bvAbs fpAbs xe
     where
-      bvAbs :: BVOp1 w t
+      bvAbs :: BVOp1 sym w
       bvAbs e = do
         zero <- WI.bvLit sym knownNat (BV.zero knownNat)
         e_neg <- WI.bvSlt sym e zero
         neg_e <- WI.bvSub sym zero e
         WI.bvIte sym e_neg neg_e e
 
-      fpAbs :: FPOp1 fpp t
+      fpAbs :: FPOp1 sym fpp
       fpAbs e = do
         zero <- WI.floatLit sym knownRepr bfPosZero
         e_neg <- WI.floatLt sym e zero
@@ -407,7 +417,7 @@ translateOp1 sym op xe = case (op, xe) of
         WI.floatIte sym e_neg neg_e e
   (CE.Sign _, xe) -> numOp bvSign fpSign xe
     where
-      bvSign :: BVOp1 w t
+      bvSign :: BVOp1 sym w
       bvSign e = do
         zero <- WI.bvLit sym knownRepr (BV.zero knownNat)
         neg_one <- WI.bvLit sym knownNat (BV.mkBV knownNat (-1))
@@ -417,7 +427,7 @@ translateOp1 sym op xe = case (op, xe) of
         t <- WI.bvIte sym e_neg neg_one pos_one
         WI.bvIte sym e_zero zero t
 
-      fpSign :: FPOp1 fpp t
+      fpSign :: FPOp1 sym fpp
       fpSign e = do
         zero <- WI.floatLit sym knownRepr bfPosZero
         neg_one <- WI.floatLit sym knownRepr (bfFromDouble (-1.0))
@@ -428,7 +438,7 @@ translateOp1 sym op xe = case (op, xe) of
         WI.floatIte sym e_zero zero t
   (CE.Recip _, xe) -> fpOp recip xe
     where
-      recip :: FPOp1 fpp t
+      recip :: FPOp1 sym fpp
       recip e = do
         one <- WI.floatLit sym knownRepr (bfFromDouble 1.0)
         WI.floatDiv sym fpRM one e
@@ -500,10 +510,10 @@ translateOp1 sym op xe = case (op, xe) of
     -- Check the type of the argument. If the argument is a bitvector value,
     -- apply the 'BVOp1'. If the argument is a floating-point value, apply the
     -- 'FPOp1'. Otherwise, 'panic'.
-    numOp :: (forall w . BVOp1 w t)
-          -> (forall fpp . FPOp1 fpp t)
-          -> XExpr t
-          -> IO (XExpr t)
+    numOp :: (forall w . BVOp1 sym w)
+          -> (forall fpp . FPOp1 sym fpp)
+          -> XExpr sym
+          -> IO (XExpr sym)
     numOp bvOp fpOp xe = case xe of
       XInt8 e -> XInt8 <$> bvOp e
       XInt16 e -> XInt16 <$> bvOp e
@@ -517,7 +527,7 @@ translateOp1 sym op xe = case (op, xe) of
       XDouble e -> XDouble <$> fpOp e
       _ -> panic
 
-    bvOp :: (forall w . BVOp1 w t) -> XExpr t -> IO (XExpr t)
+    bvOp :: (forall w . BVOp1 sym w) -> XExpr sym -> IO (XExpr sym)
     bvOp f xe = case xe of
       XInt8 e -> XInt8 <$> f e
       XInt16 e -> XInt16 <$> f e
@@ -529,82 +539,83 @@ translateOp1 sym op xe = case (op, xe) of
       XWord64 e -> XWord64 <$> f e
       _ -> panic
 
-    fpOp :: (forall fpp . FPOp1 fpp t) -> XExpr t -> IO (XExpr t)
+    fpOp :: (forall fpp . FPOp1 sym fpp) -> XExpr sym -> IO (XExpr sym)
     fpOp g xe = case xe of
       XFloat e -> XFloat <$> g e
       XDouble e -> XDouble <$> g e
       _ -> panic
 
-    realOp :: RealOp1 t -> XExpr t -> IO (XExpr t)
+    realOp :: RealOp1 sym -> XExpr sym -> IO (XExpr sym)
     realOp h xe = fpOp hf xe
       where
-        hf :: (forall fpp . FPOp1 fpp t)
+        hf :: (forall fpp . FPOp1 sym fpp)
         hf e = do
           re <- WI.floatToReal sym e
           hre <- h re
           WI.realToFloat sym knownRepr fpRM hre
 
-    realRecip :: RealOp1 t
+    realRecip :: RealOp1 sym
     realRecip e = do
       one <- WI.realLit sym 1
       WI.realDiv sym one e
 
 -- | A binary operation over bitvector values.
-type BVOp2 w t =
+type BVOp2 sym w =
      (KnownNat w, 1 <= w)
-  => WB.BVExpr t w
-  -> WB.BVExpr t w
-  -> IO (WB.BVExpr t w)
+  => WI.SymBV sym w
+  -> WI.SymBV sym w
+  -> IO (WI.SymBV sym w)
 
 -- | A binary operation over floating-point values.
-type FPOp2 fpp t =
+type FPOp2 sym fpp =
      KnownRepr WT.FloatPrecisionRepr fpp
-  => WB.Expr t (WT.BaseFloatType fpp)
-  -> WB.Expr t (WT.BaseFloatType fpp)
-  -> IO (WB.Expr t (WT.BaseFloatType fpp))
+  => WI.SymExpr sym (WT.BaseFloatType fpp)
+  -> WI.SymExpr sym (WT.BaseFloatType fpp)
+  -> IO (WI.SymExpr sym (WT.BaseFloatType fpp))
 
 -- | A binary operation over real number values.
-type RealOp2 t =
-     WB.Expr t WT.BaseRealType
-  -> WB.Expr t WT.BaseRealType
-  -> IO (WB.Expr t WT.BaseRealType)
+type RealOp2 sym =
+     WI.SymExpr sym WT.BaseRealType
+  -> WI.SymExpr sym WT.BaseRealType
+  -> IO (WI.SymExpr sym WT.BaseRealType)
 
 -- | A binary predicate that checks if two boolean values are equal.
-type BoolCmp2 t =
-     WB.BoolExpr t
-  -> WB.BoolExpr t
-  -> IO (WB.BoolExpr t)
+type BoolCmp2 sym =
+     WI.Pred sym
+  -> WI.Pred sym
+  -> IO (WI.Pred sym)
 
 -- | A binary predicate that checks if two bitvector values are equal.
-type BVCmp2 w t =
+type BVCmp2 sym w =
      (KnownNat w, 1 <= w)
-  => WB.BVExpr t w
-  -> WB.BVExpr t w
-  -> IO (WB.BoolExpr t)
+  => WI.SymBV sym w
+  -> WI.SymBV sym w
+  -> IO (WI.Pred sym)
 
 -- | A predicate that checks if two floating-point values are equal.
-type FPCmp2 fpp t =
+type FPCmp2 sym fpp =
      KnownRepr WT.FloatPrecisionRepr fpp
-  => WB.Expr t (WT.BaseFloatType fpp)
-  -> WB.Expr t (WT.BaseFloatType fpp)
-  -> IO (WB.BoolExpr t)
+  => WI.SymExpr sym (WT.BaseFloatType fpp)
+  -> WI.SymExpr sym (WT.BaseFloatType fpp)
+  -> IO (WI.Pred sym)
 
 -- | Translate a binary operation and its arguments into a what4 representation
 -- of the operation applied to the arguments.
-translateOp2 :: forall t st fs a b c .
-                WB.ExprBuilder t st fs
-             -> (WB.ExprSymFn t
+translateOp2 :: forall sym a b c.
+                WI.IsSymExprBuilder sym
+             => sym
+             -> (WI.SymFn sym
                  (EmptyCtx ::> WT.BaseRealType ::> WT.BaseRealType)
                  WT.BaseRealType)
              -- ^ Pow function
-             -> (WB.ExprSymFn t
+             -> (WI.SymFn sym
                  (EmptyCtx ::> WT.BaseRealType ::> WT.BaseRealType)
                  WT.BaseRealType)
              -- ^ Logb function
              -> CE.Op2 a b c
-             -> XExpr t
-             -> XExpr t
-             -> IO (XExpr t)
+             -> XExpr sym
+             -> XExpr sym
+             -> IO (XExpr sym)
 translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
   (CE.And, XBool e1, XBool e2) -> XBool <$> WI.andPred sym e1 e2
   (CE.Or, XBool e1, XBool e2) -> XBool <$> WI.orPred sym e1 e2
@@ -616,7 +627,7 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
   (CE.Fdiv _, xe1, xe2) -> fpOp (WI.floatDiv sym fpRM) xe1 xe2
   (CE.Pow _, xe1, xe2) -> fpOp powFn' xe1 xe2
     where
-      powFn' :: FPOp2 fpp t
+      powFn' :: FPOp2 sym fpp
       powFn' e1 e2 = do
         re1 <- WI.floatToReal sym e1
         re2 <- WI.floatToReal sym e2
@@ -625,7 +636,7 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
         WI.realToFloat sym knownRepr fpRM rpow
   (CE.Logb _, xe1, xe2) -> fpOp logbFn' xe1 xe2
     where
-      logbFn' :: FPOp2 fpp t
+      logbFn' :: FPOp2 sym fpp
       logbFn' e1 e2 = do
         re1 <- WI.floatToReal sym e1
         re2 <- WI.floatToReal sym e2
@@ -636,17 +647,17 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
     cmp (WI.eqPred sym) (WI.bvEq sym) (WI.floatEq sym) xe1 xe2
   (CE.Ne _, xe1, xe2) -> cmp neqPred bvNeq fpNeq xe1 xe2
     where
-      neqPred :: BoolCmp2 t
+      neqPred :: BoolCmp2 sym
       neqPred e1 e2 = do
         e <- WI.eqPred sym e1 e2
         WI.notPred sym e
 
-      bvNeq :: forall w . BVCmp2 w t
+      bvNeq :: forall w . BVCmp2 sym w
       bvNeq e1 e2 = do
         e <- WI.bvEq sym e1 e2
         WI.notPred sym e
 
-      fpNeq :: forall fpp . FPCmp2 fpp t
+      fpNeq :: forall fpp . FPCmp2 sym fpp
       fpNeq e1 e2 = do
         e <- WI.floatEq sym e1 e2
         WI.notPred sym e
@@ -700,11 +711,11 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
     -- Check the types of the arguments. If the arguments are bitvector values,
     -- apply the 'BVOp2'. If the arguments are floating-point values, apply the
     -- 'FPOp2'. Otherwise, 'panic'.
-    numOp :: (forall w . BVOp2 w t)
-          -> (forall fpp . FPOp2 fpp t)
-          -> XExpr t
-          -> XExpr t
-          -> IO (XExpr t)
+    numOp :: (forall w . BVOp2 sym w)
+          -> (forall fpp . FPOp2 sym fpp)
+          -> XExpr sym
+          -> XExpr sym
+          -> IO (XExpr sym)
     numOp bvOp fpOp xe1 xe2 = case (xe1, xe2) of
       (XInt8 e1, XInt8 e2) -> XInt8 <$> bvOp e1 e2
       (XInt16 e1, XInt16 e2) -> XInt16 <$> bvOp e1 e2
@@ -721,11 +732,11 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
     -- Check the types of the arguments. If the arguments are signed bitvector
     -- values, apply the first 'BVOp2'. If the arguments are unsigned bitvector
     -- values, apply the second 'BVOp2'. Otherwise, 'panic'.
-    bvOp :: (forall w . BVOp2 w t)
-         -> (forall w . BVOp2 w t)
-         -> XExpr t
-         -> XExpr t
-         -> IO (XExpr t)
+    bvOp :: (forall w . BVOp2 sym w)
+         -> (forall w . BVOp2 sym w)
+         -> XExpr sym
+         -> XExpr sym
+         -> IO (XExpr sym)
     bvOp opS opU xe1 xe2 = case (xe1, xe2) of
       (XInt8 e1, XInt8 e2) -> XInt8 <$> opS e1 e2
       (XInt16 e1, XInt16 e2) -> XInt16 <$> opS e1 e2
@@ -737,10 +748,10 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
       (XWord64 e1, XWord64 e2) -> XWord64 <$> opU e1 e2
       _ -> panic
 
-    fpOp :: (forall fpp . FPOp2 fpp t)
-         -> XExpr t
-         -> XExpr t
-         -> IO (XExpr t)
+    fpOp :: (forall fpp . FPOp2 sym fpp)
+         -> XExpr sym
+         -> XExpr sym
+         -> IO (XExpr sym)
     fpOp op xe1 xe2 = case (xe1, xe2) of
       (XFloat e1, XFloat e2) -> XFloat <$> op e1 e2
       (XDouble e1, XDouble e2) -> XDouble <$> op e1 e2
@@ -749,12 +760,12 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
     -- Check the types of the arguments. If the arguments are bitvector values,
     -- apply the 'BVCmp2'. If the arguments are floating-point values, apply the
     -- 'FPCmp2'. Otherwise, 'panic'.
-    cmp :: BoolCmp2 t
-        -> (forall w . BVCmp2 w t)
-        -> (forall fpp . FPCmp2 fpp t)
-        -> XExpr t
-        -> XExpr t
-        -> IO (XExpr t)
+    cmp :: BoolCmp2 sym
+        -> (forall w . BVCmp2 sym w)
+        -> (forall fpp . FPCmp2 sym fpp)
+        -> XExpr sym
+        -> XExpr sym
+        -> IO (XExpr sym)
     cmp boolOp bvOp fpOp xe1 xe2 = case (xe1, xe2) of
       (XBool e1, XBool e2) -> XBool <$> boolOp e1 e2
       (XInt8 e1, XInt8 e2) -> XBool <$> bvOp e1 e2
@@ -773,12 +784,12 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
     -- values, apply the first 'BVCmp2'. If the arguments are unsigned bitvector
     -- values, apply the second 'BVCmp2'. If the arguments are floating-point
     -- values, apply the 'FPCmp2'. Otherwise, 'panic'.
-    numCmp :: (forall w . BVCmp2 w t)
-           -> (forall w . BVCmp2 w t)
-           -> (forall fpp . FPCmp2 fpp t)
-           -> XExpr t
-           -> XExpr t
-           -> IO (XExpr t)
+    numCmp :: (forall w . BVCmp2 sym w)
+           -> (forall w . BVCmp2 sym w)
+           -> (forall fpp . FPCmp2 sym fpp)
+           -> XExpr sym
+           -> XExpr sym
+           -> IO (XExpr sym)
     numCmp bvSOp bvUOp fpOp xe1 xe2 = case (xe1, xe2) of
       (XInt8 e1, XInt8 e2) -> XBool <$> bvSOp e1 e2
       (XInt16 e1, XInt16 e2) -> XBool <$> bvSOp e1 e2
@@ -798,14 +809,14 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
     -- element of the array at that index. Otherwise, proceed to the next @if@
     -- expression, which checks the next index in the array.
     buildIndexExpr :: 1 <= n
-                   => WB.ExprBuilder t st fs
+                   => sym
                    -> Word32
                    -- ^ Index
-                   -> WB.Expr t (WT.BaseBVType 32)
+                   -> WI.SymBV sym 32
                    -- ^ Index
-                   -> V.Vector n (XExpr t)
+                   -> V.Vector n (XExpr sym)
                    -- ^ Elements
-                   -> IO (XExpr t)
+                   -> IO (XExpr sym)
     buildIndexExpr sym curIx ix xelts = case V.uncons xelts of
       (xe, Left Refl) -> return xe
       (xe, Right xelts') -> do
@@ -816,11 +827,11 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
         mkIte sym ixEq xe rstExpr
 
     -- Construct an @if@ expression of the appropriate type.
-    mkIte :: WB.ExprBuilder t st fs
-          -> WB.Expr t WT.BaseBoolType
-          -> XExpr t
-          -> XExpr t
-          -> IO (XExpr t)
+    mkIte :: sym
+          -> WI.Pred sym
+          -> XExpr sym
+          -> XExpr sym
+          -> IO (XExpr sym)
     mkIte sym pred xe1 xe2 = case (xe1, xe2) of
           (XBool e1, XBool e2) -> XBool <$> WI.itePred sym pred e1 e2
           (XInt8 e1, XInt8 e2) -> XInt8 <$> WI.bvIte sym pred e1 e2
@@ -843,13 +854,14 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
 
 -- | Translate a ternary operation and its arguments into a what4 representation
 -- of the operation applied to the arguments.
-translateOp3 :: forall t st fs a b c d .
-                WB.ExprBuilder t st fs
+translateOp3 :: forall sym a b c d.
+                WI.IsExprBuilder sym
+             => sym
              -> CE.Op3 a b c d
-             -> XExpr t
-             -> XExpr t
-             -> XExpr t
-             -> IO (XExpr t)
+             -> XExpr sym
+             -> XExpr sym
+             -> XExpr sym
+             -> IO (XExpr sym)
 translateOp3 sym (CE.Mux _) (XBool te) xe1 xe2 = case (xe1, xe2) of
   (XBool e1, XBool e2) -> XBool <$> WI.itePred sym te e1 e2
   (XInt8 e1, XInt8 e2) -> XInt8 <$> WI.bvIte sym te e1 e2
@@ -869,32 +881,40 @@ translateOp3 _ _ _ _ _ = panic
 
 -- | The What4 representation of a copilot expression. We do not attempt to
 -- track the type of the inner expression at the type level, but instead lump
--- everything together into the 'XExpr t' type. The only reason this is a GADT
+-- everything together into the @XExpr sym@ type. The only reason this is a GADT
 -- is for the array case; we need to know that the array length is strictly
 -- positive.
-data XExpr t where
-  XBool       :: WB.Expr t WT.BaseBoolType -> XExpr t
-  XInt8       :: WB.Expr t (WT.BaseBVType 8) -> XExpr t
-  XInt16      :: WB.Expr t (WT.BaseBVType 16) -> XExpr t
-  XInt32      :: WB.Expr t (WT.BaseBVType 32) -> XExpr t
-  XInt64      :: WB.Expr t (WT.BaseBVType 64) -> XExpr t
-  XWord8      :: WB.Expr t (WT.BaseBVType 8) -> XExpr t
-  XWord16     :: WB.Expr t (WT.BaseBVType 16) -> XExpr t
-  XWord32     :: WB.Expr t (WT.BaseBVType 32) -> XExpr t
-  XWord64     :: WB.Expr t (WT.BaseBVType 64) -> XExpr t
-  XFloat      :: WB.Expr t (WT.BaseFloatType WT.Prec32) -> XExpr t
-  XDouble     :: WB.Expr t (WT.BaseFloatType WT.Prec64) -> XExpr t
-  XEmptyArray :: XExpr t
-  XArray      :: 1 <= n => V.Vector n (XExpr t) -> XExpr t
-  XStruct     :: [XExpr t] -> XExpr t
-  -- XArray      :: NatRepr n
-  --             -> BaseTypeRepr tp
-  --             -> Some (WB.Expr t)
-  -- XStruct     :: Assignment BaseTypeRepr tps
-  --             -> WB.Expr t (BaseStructType tps)
-  --             -> XExpr t
+data XExpr sym where
+  XBool       :: WI.SymExpr sym WT.BaseBoolType -> XExpr sym
+  XInt8       :: WI.SymExpr sym (WT.BaseBVType 8) -> XExpr sym
+  XInt16      :: WI.SymExpr sym (WT.BaseBVType 16) -> XExpr sym
+  XInt32      :: WI.SymExpr sym (WT.BaseBVType 32) -> XExpr sym
+  XInt64      :: WI.SymExpr sym (WT.BaseBVType 64) -> XExpr sym
+  XWord8      :: WI.SymExpr sym (WT.BaseBVType 8) -> XExpr sym
+  XWord16     :: WI.SymExpr sym (WT.BaseBVType 16) -> XExpr sym
+  XWord32     :: WI.SymExpr sym (WT.BaseBVType 32) -> XExpr sym
+  XWord64     :: WI.SymExpr sym (WT.BaseBVType 64) -> XExpr sym
+  XFloat      :: WI.SymExpr sym (WT.BaseFloatType WT.Prec32) -> XExpr sym
+  XDouble     :: WI.SymExpr sym (WT.BaseFloatType WT.Prec64) -> XExpr sym
+  XEmptyArray :: XExpr sym
+  XArray      :: 1 <= n => V.Vector n (XExpr sym) -> XExpr sym
+  XStruct     :: [XExpr sym] -> XExpr sym
 
-deriving instance Show (XExpr t)
+instance WI.IsExprBuilder sym => Show (XExpr sym) where
+  show (XBool e)    = "XBool " ++ show (WI.printSymExpr e)
+  show (XInt8 e)    = "XInt8 " ++ show (WI.printSymExpr e)
+  show (XInt16 e)   = "XInt16 " ++ show (WI.printSymExpr e)
+  show (XInt32 e)   = "XInt32 " ++ show (WI.printSymExpr e)
+  show (XInt64 e)   = "XInt64 " ++ show (WI.printSymExpr e)
+  show (XWord8 e)   = "XWord8 " ++ show (WI.printSymExpr e)
+  show (XWord16 e)  = "XWord16 " ++ show (WI.printSymExpr e)
+  show (XWord32 e)  = "XWord32 " ++ show (WI.printSymExpr e)
+  show (XWord64 e)  = "XWord64 " ++ show (WI.printSymExpr e)
+  show (XFloat e)   = "XFloat " ++ show (WI.printSymExpr e)
+  show (XDouble e)  = "XDouble " ++ show (WI.printSymExpr e)
+  show XEmptyArray  = "[]"
+  show (XArray vs)  = showList (V.toList vs) ""
+  show (XStruct xs) = "XStruct " ++ showList xs ""
 
 -- Auxiliary definitions
 

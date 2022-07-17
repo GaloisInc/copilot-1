@@ -170,7 +170,10 @@ data CopilotValue a = CopilotValue { cvType :: CT.Type a
                                    , cvVal :: a
                                    }
 
-valFromExpr :: WG.GroundEvalFn t -> XExpr t -> IO (Some CopilotValue)
+valFromExpr :: (sym ~ WB.ExprBuilder t st fs)
+            => WG.GroundEvalFn t
+            -> XExpr sym
+            -> IO (Some CopilotValue)
 valFromExpr ge xe = case xe of
   XBool e -> Some . CopilotValue CT.Bool <$> WG.groundEval ge e
   XInt8 e -> Some . CopilotValue CT.Int8 . fromBV <$> WG.groundEval ge e

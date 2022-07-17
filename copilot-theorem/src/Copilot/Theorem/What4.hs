@@ -70,6 +70,7 @@ import qualified What4.Config           as WC
 import qualified What4.Expr.Builder     as WB
 import qualified What4.Expr.GroundEval  as WG
 import qualified What4.Interface        as WI
+import qualified What4.InterpretedFloatingPoint as WFP
 import qualified What4.Solver           as WS
 import qualified What4.Solver.DReal     as WS
 
@@ -79,7 +80,8 @@ import Data.Foldable (foldrM)
 import Data.Parameterized.NatRepr
 import Data.Parameterized.Nonce
 import Data.Parameterized.Some
-import LibBF (bfToDouble, pattern NearEven)
+import GHC.Float (castWord32ToFloat, castWord64ToDouble)
+import LibBF (BigFloat, bfToDouble, pattern NearEven)
 import qualified Panic as Panic
 
 import           Copilot.Theorem.What4.Translate
@@ -174,7 +176,10 @@ data CopilotValue a = CopilotValue { cvType :: CT.Type a
                                    , cvVal :: a
                                    }
 
-valFromExpr :: (sym ~ WB.ExprBuilder t st fs)
+valFromExpr :: forall sym t st fm.
+               ( sym ~ WB.ExprBuilder t st (WB.Flags fm)
+               , WI.KnownRepr WB.FloatModeRepr fm
+               )
             => WG.GroundEvalFn t
             -> XExpr sym
             -> IO (Some CopilotValue)
@@ -189,10 +194,39 @@ valFromExpr ge xe = case xe of
   XWord32 e -> Some . CopilotValue CT.Word32 . fromBV <$> WG.groundEval ge e
   XWord64 e -> Some . CopilotValue CT.Word64 . fromBV <$> WG.groundEval ge e
   XFloat e ->
-    Some . CopilotValue CT.Float . realToFrac . fst . bfToDouble NearEven <$> WG.groundEval ge e
+    Some . CopilotValue CT.Float <$>
+      iFloatGroundEval WFP.SingleFloatRepr e
+                       (realToFrac . fst . bfToDouble NearEven)
+                       fromRational
+                       (castWord32ToFloat . fromInteger . BV.asUnsigned)
   XDouble e ->
-    Some . CopilotValue CT.Double . fst . bfToDouble NearEven <$> WG.groundEval ge e
+    Some . CopilotValue CT.Double <$>
+      iFloatGroundEval WFP.DoubleFloatRepr e
+                       (fst . bfToDouble NearEven)
+                       fromRational
+                       (castWord64ToDouble . fromInteger . BV.asUnsigned)
   _ -> error "valFromExpr unhandled case"
   where
     fromBV :: forall a w . Num a => BV.BV w -> a
     fromBV = fromInteger . BV.asUnsigned
+
+    -- Evaluate a (possibly symbolic) floating-point value to a concrete result.
+    -- Depending on which @what4@ floating-point mode is in use, the result will
+    -- be passed to one of three different continuation arguments.
+    iFloatGroundEval ::
+      forall fi r.
+      WFP.FloatInfoRepr fi ->
+      WI.SymExpr sym (WFP.SymInterpretedFloatType sym fi) ->
+      (BigFloat -> r) ->
+      -- ^ Continuation to use if the IEEE floating-point mode is in use.
+      (Rational -> r) ->
+      -- ^ Continuation to use if the real floating-point mode is in use.
+      (forall w. BV.BV w -> r) ->
+      -- ^ Continuation to use if the uninterpreted floating-point mode is in
+      -- use.
+      IO r
+    iFloatGroundEval _ e ieeeK realK uninterpK =
+      case WI.knownRepr :: WB.FloatModeRepr fm of
+        WB.FloatIEEERepr          -> ieeeK <$> WG.groundEval ge e
+        WB.FloatRealRepr          -> realK <$> WG.groundEval ge e
+        WB.FloatUninterpretedRepr -> uninterpK <$> WG.groundEval ge e

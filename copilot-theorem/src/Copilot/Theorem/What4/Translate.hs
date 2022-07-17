@@ -25,9 +25,10 @@ module Copilot.Theorem.What4.Translate
   , TransM
   , runTransM
   , translateExpr
-  , translateExprAt
     -- * What4 representations of Copilot expressions
   , XExpr(..)
+    -- * Stream offsets
+  , StreamOffset(..)
     -- * Auxiliary functions
   , panic
   ) where
@@ -37,7 +38,8 @@ import           Control.Monad.IO.Class         (MonadIO (..))
 import           Control.Monad.State            (MonadState (..), StateT (..),
                                                  gets, modify)
 import qualified Data.BitVector.Sized           as BV
-import           Data.List                      (elemIndex, genericLength)
+import           Data.List                      (elemIndex, genericIndex,
+                                                 genericLength)
 import qualified Data.Map                       as Map
 import           Data.Maybe                     (fromJust)
 import           Data.Parameterized.Classes     (KnownRepr (..))
@@ -82,18 +84,11 @@ import qualified Copilot.Core.Type.Array        as CT
 -- translation and is never modified. This maps from stream ids to the
 -- core stream definitions.
 data TransState sym = TransState {
-  -- | Map of all external variables we encounter during translation. These are
-  -- just fresh constants. The offset indicates how many timesteps in the past
-  -- this constant represents for that stream.
-  externVars :: Map.Map (CE.Name, Int) (XExpr sym),
-  -- | Map of external variables at specific indices (positive), rather than
-  -- offset into the past. This is for interpreting streams at specific offsets.
-  externVarsAt :: Map.Map (CE.Name, Int) (XExpr sym),
-  -- | Map from (stream id, negative offset) to fresh constant. These are all
-  -- constants representing the values of a stream at some point in the past.
-  -- The offset (ALWAYS NEGATIVE) indicates how many timesteps in the past
-  -- this constant represents for that stream.
-  streamConstants :: Map.Map (CE.Id, Int) (XExpr sym),
+  -- | Memo table for external variables, indexed by the external stream name
+  -- and a stream offset.
+  externVars :: Map.Map (CE.Name, StreamOffset) (XExpr sym),
+  -- | Memo table for stream values, indexed by the stream 'CE.Id' and offset.
+  streamValues :: Map.Map (CE.Id, StreamOffset) (XExpr sym),
   -- | Map from stream ids to the streams themselves. This value is never
   -- modified, but I didn't want to make this an RWS, so it's represented as a
   -- stateful value.
@@ -122,8 +117,7 @@ runTransM spec m = do
         (\stream -> (CS.streamId stream, stream)) <$> CS.specStreams spec
       st = TransState
            { externVars = mempty
-           , externVarsAt = mempty
-           , streamConstants = mempty
+           , streamValues = mempty
            , streams = streamMap
            , sidePreds = []
            }
@@ -131,84 +125,102 @@ runTransM spec m = do
   (res, _) <- runStateT (unTransM m) st
   return res
 
--- | Translate an expression into a what4 representation. The int offset keeps
--- track of how many timesteps into the past each variable is referring to.
--- Initially the value should be zero, but when we translate a stream, the
--- offset is recomputed based on the length of that stream's prefix (subtracted)
--- and the drop index (added).
+-- | Compute the value of a stream expression at the given offset.
 translateExpr :: WFP.IsInterpretedFloatSymExprBuilder sym
               => sym
-              -> Int
-              -- ^ number of timesteps in the past we are currently looking
-              -- (must always be <= 0)
               -> CE.Expr a
+              -- ^ Expression to translate
+              -> StreamOffset
+              -- ^ Offset to compute
               -> TransM sym (XExpr sym)
-translateExpr sym offset e = case e of
+translateExpr sym e offset = case e of
   CE.Const tp a -> liftIO $ translateConstExpr sym tp a
-  CE.Drop _tp ix streamId
-    -- If we are referencing a past value of this stream, just return an
-    -- unconstrained constant.
-    | offset + fromIntegral ix < 0 ->
-        getStreamConstant sym streamId (offset + fromIntegral ix)
-    -- If we are referencing a current or future value of this stream, we need
-    -- to translate the stream's expression, using an offset computed based on
-    -- the current offset (negative or 0), the drop index (positive or 0), and
-    -- the length of the stream's buffer (subtracted).
-    | otherwise -> do
-        CS.Stream _ buf e _ <- getStreamDef streamId
-        translateExpr sym (offset + fromIntegral ix - length buf) e
+  CE.Drop _tp ix streamId -> getStreamValue sym streamId (addOffset offset ix)
   CE.Local _ _ _ _ _ -> error "translateExpr: Local unimplemented"
   CE.Var _ _ -> error "translateExpr: Var unimplemented"
   CE.ExternVar tp nm _prefix -> getExternConstant sym tp nm offset
   CE.Op1 op e1 -> do
-    xe1 <- translateExpr sym offset e1
+    xe1 <- translateExpr sym e1 offset
     translateOp1 sym e op xe1
   CE.Op2 op e1 e2 -> do
-    xe1 <- translateExpr sym offset e1
-    xe2 <- translateExpr sym offset e2
+    xe1 <- translateExpr sym e1 offset
+    xe2 <- translateExpr sym e2 offset
     translateOp2 sym e op xe1 xe2
   CE.Op3 op e1 e2 e3 -> do
-    xe1 <- translateExpr sym offset e1
-    xe2 <- translateExpr sym offset e2
-    xe3 <- translateExpr sym offset e3
+    xe1 <- translateExpr sym e1 offset
+    xe2 <- translateExpr sym e2 offset
+    xe3 <- translateExpr sym e3 offset
     translateOp3 sym e op xe1 xe2 xe3
   CE.Label _ _ _ -> error "translateExpr: Label unimplemented"
 
--- | Translate an expression into a what4 representation at a /specific/
--- timestep, rather than "at some indeterminate point in the future."
-translateExprAt :: WFP.IsInterpretedFloatSymExprBuilder sym
-                => sym
-                -> Int
-                -- ^ Index of timestep
-                -> CE.Expr a
-                -- ^ stream expression
-                -> TransM sym (XExpr sym)
-translateExprAt sym k e =
-  case e of
-    CE.Const tp a -> liftIO $ translateConstExpr sym tp a
-    CE.Drop _tp ix streamId -> do
-      CS.Stream _ buf e tp <- getStreamDef streamId
-      if k' < length buf
-        then liftIO $ translateConstExpr sym tp (buf !! k')
-        else translateExprAt sym (k' - length buf) e
-      where
-        k' = k + fromIntegral ix
-    CE.Local _ _ _ _ _ -> error "translateExpr: Local unimplemented"
-    CE.Var _ _ -> error "translateExpr: Var unimplemented"
-    CE.ExternVar tp nm _prefix -> getExternConstantAt sym tp nm k
-    CE.Op1 op e1 -> do
-      xe1 <- translateExprAt sym k e1
-      translateOp1 sym e op xe1
-    CE.Op2 op e1 e2 -> do
-      xe1 <- translateExprAt sym k e1
-      xe2 <- translateExprAt sym k e2
-      translateOp2 sym e op xe1 xe2
-    CE.Op3 op e1 e2 e3 -> do
-      xe1 <- translateExprAt sym k e1
-      xe2 <- translateExprAt sym k e2
-      xe3 <- translateExprAt sym k e3
-      translateOp3 sym e op xe1 xe2 xe3
-    CE.Label _ _ _ -> error "translateExpr: Label unimplemented"
+-- | Compute and cache the value of a stream with the given identifier at the
+-- given offset.
+getStreamValue :: WFP.IsInterpretedFloatSymExprBuilder sym
+               => sym
+               -> CE.Id
+               -> StreamOffset
+               -> TransM sym (XExpr sym)
+getStreamValue sym streamId offset = do
+  svs <- gets streamValues
+  case Map.lookup (streamId, offset) svs of
+    Just xe -> return xe
+    Nothing -> do
+      streamDef <- getStreamDef streamId
+      xe <- computeStreamValue streamDef
+      modify $ \st ->
+        st { streamValues =
+               Map.insert (streamId, offset) xe (streamValues st) }
+      return xe
+  where
+    computeStreamValue
+      (CS.Stream
+        { CS.streamId = id, CS.streamBuffer = buf,
+          CS.streamExpr = ex, CS.streamExprType = tp }) =
+      let len = genericLength buf in
+      case offset of
+        AbsoluteOffset i
+          | i < 0     -> panic ["Invalid absolute offset " ++ show i ++
+                                " for stream " ++ show id]
+          | i < len   -> liftIO (translateConstExpr sym tp (genericIndex buf i))
+          | otherwise -> translateExpr sym ex (AbsoluteOffset (i - len))
+        RelativeOffset i
+          | i < 0     -> panic ["Invalid relative offset " ++ show i ++
+                                " for stream " ++ show id]
+          | i < len   -> let nm = "s" ++ show id ++ "_r" ++ show i
+                         in liftIO (freshCPConstant sym nm tp)
+          | otherwise -> translateExpr sym ex (RelativeOffset (i - len))
+
+-- | Compute and cache the value of an external stream with the given name at
+-- the given offset.
+getExternConstant :: WFP.IsInterpretedFloatSymExprBuilder sym
+                  => sym
+                  -> CT.Type a
+                  -> CE.Name
+                  -> StreamOffset
+                  -> TransM sym (XExpr sym)
+getExternConstant sym tp nm offset = do
+  es <- gets externVars
+  case Map.lookup (nm, offset) es of
+    Just xe -> return xe
+    Nothing -> do
+      xe <- computeExternConstant
+      modify $ \st ->
+        st { externVars = Map.insert (nm, offset) xe (externVars st)
+           }
+      return xe
+ where
+   computeExternConstant =
+     case offset of
+       AbsoluteOffset i
+         | i < 0     -> panic ["Invalid absolute offset " ++ show i ++
+                               " for external stream " ++ nm]
+         | otherwise -> let nm' = nm ++ "_a" ++ show i
+                        in liftIO (freshCPConstant sym nm' tp)
+       RelativeOffset i
+         | i < 0     -> panic ["Invalid relative offset " ++ show i ++
+                               " for external stream " ++ nm]
+         | otherwise -> let nm' = nm ++ "_r" ++ show i
+                        in liftIO (freshCPConstant sym nm' tp)
 
 -- | A view of an XExpr as a bitvector expression, a natrepr for its width, its
 -- signed/unsigned status, and the constructor used to reconstruct an XExpr from
@@ -360,65 +372,6 @@ freshCPConstant sym nm tp = case tp of
     elts <- forM (CT.toValues stp) $ \(CT.Value ftp _) ->
       freshCPConstant sym "" ftp
     return $ XStruct elts
-
--- | Get the constant for a given stream id and some offset into the past. This
--- should only be called with a strictly negative offset. When this function
--- gets called for the first time for a given (streamId, offset) pair, it
--- generates a fresh constant and stores it in an internal map. Thereafter, this
--- function will just return that constant when called with the same pair.
-getStreamConstant :: WFP.IsInterpretedFloatSymExprBuilder sym
-                  => sym
-                  -> CE.Id
-                  -> Int
-                  -> TransM sym (XExpr sym)
-getStreamConstant sym streamId offset = do
-  scs <- gets streamConstants
-  case Map.lookup (streamId, offset) scs of
-    Just xe -> return xe
-    Nothing -> do
-      CS.Stream _ _ _ tp <- getStreamDef streamId
-      let nm = show streamId ++ "_" ++ show offset
-      xe <- liftIO $ freshCPConstant sym nm tp
-      modify (\st ->
-        st { streamConstants =
-               Map.insert (streamId, offset) xe scs })
-      return xe
-
--- | Get the constant for a given external variable and some offset into the
--- past. This should only be called with a strictly negative offset. When this
--- function gets called for the first time for a given (var, offset) pair, it
--- generates a fresh constant and stores it in an internal map. Thereafter, this
--- function will just return that constant when called with the same pair.
-getExternConstant :: WFP.IsInterpretedFloatSymExprBuilder sym
-                  => sym
-                  -> CT.Type a
-                  -> CE.Name
-                  -> Int
-                  -> TransM sym (XExpr sym)
-getExternConstant sym tp var offset = do
-  es <- gets externVars
-  case Map.lookup (var, offset) es of
-    Just xe -> return xe
-    Nothing -> do
-      xe <- liftIO $ freshCPConstant sym var tp
-      modify (\st -> st { externVars = Map.insert (var, offset) xe es} )
-      return xe
-
--- | Get the constant for a given external variable at some specific timestep.
-getExternConstantAt :: WFP.IsInterpretedFloatSymExprBuilder sym
-                    => sym
-                    -> CT.Type a
-                    -> CE.Name
-                    -> Int
-                    -> TransM sym (XExpr sym)
-getExternConstantAt sym tp var ix = do
-  es <- gets externVarsAt
-  case Map.lookup (var, ix) es of
-    Just xe -> return xe
-    Nothing -> do
-      xe <- liftIO $ freshCPConstant sym var tp
-      modify (\st -> st { externVarsAt = Map.insert (var, ix) xe es} )
-      return xe
 
 -- | Retrieve a stream definition given its id.
 getStreamDef :: CE.Id -> TransM sym CS.Stream
@@ -1342,6 +1295,30 @@ instance WI.IsExprBuilder sym => Show (XExpr sym) where
   show XEmptyArray  = "[]"
   show (XArray vs)  = showList (V.toList vs) ""
   show (XStruct xs) = "XStruct " ++ showList xs ""
+
+-- Stream offsets
+
+-- | Streams expressions are evaluated in two possible modes. The \"absolute\"
+-- mode computes the value of a stream expression relative to the beginning of
+-- time @t=0@.  The \"relative\" mode is useful for inductive proofs and the
+-- offset values are conceptually relative to some arbitrary, but fixed, index
+-- @j>=0@. In both cases, negative indexes are not allowed.
+--
+-- The main difference between these modes is the interpretation of streams for
+-- the first values, which are in the \"buffer\" range.  For absolute indices,
+-- the actual fixed values for the streams are returned; for relative indices,
+-- uninterpreted values are generated for the values in the stream buffer. For
+-- both modes, stream values after their buffer region are defined by their
+-- recurrence expression.
+data StreamOffset
+  = AbsoluteOffset !Integer
+  | RelativeOffset !Integer
+ deriving (Eq, Ord, Show)
+
+-- | Increment a stream offset by a drop amount.
+addOffset :: StreamOffset -> CE.DropIdx -> StreamOffset
+addOffset (AbsoluteOffset i) j = AbsoluteOffset (i + toInteger j)
+addOffset (RelativeOffset i) j = RelativeOffset (i + toInteger j)
 
 -- Auxiliary definitions
 

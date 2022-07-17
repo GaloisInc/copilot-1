@@ -77,6 +77,7 @@ import qualified What4.Solver.DReal     as WS
 import Control.Monad.State
 import qualified Data.BitVector.Sized as BV
 import Data.Foldable (foldrM)
+import Data.List (genericLength)
 import Data.Parameterized.NatRepr
 import Data.Parameterized.Nonce
 import Data.Parameterized.Some
@@ -128,15 +129,17 @@ prove solver spec = do
   -- Define TransM action for proving properties. Doing this in TransM rather
   -- than IO allows us to reuse the state for each property.
   let proveProperties = forM (CS.specProperties spec) $ \pr -> do
-        let bufLen (CS.Stream _ buf _ _) = length buf
+        let bufLen (CS.Stream _ buf _ _) = genericLength buf
             maxBufLen = maximum (0 : (bufLen <$> CS.specStreams spec))
         prefix <- forM [0 .. maxBufLen - 1] $ \k -> do
-          xe <- translateExprAt sym k (CS.propertyExpr pr)
+          xe <- translateExpr sym (CS.propertyExpr pr) (AbsoluteOffset k)
           case xe of
             XBool p -> return p
             _ -> expectedBool xe
         p <- do
-          xe <- translateExpr sym 0 (CS.propertyExpr pr)
+          xe <- translateExpr sym
+                              (CS.propertyExpr pr)
+                              (RelativeOffset maxBufLen)
           case xe of
             XBool p -> return p
             _ -> expectedBool xe

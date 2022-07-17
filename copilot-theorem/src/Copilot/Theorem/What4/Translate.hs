@@ -22,7 +22,8 @@
 module Copilot.Theorem.What4.Translate
   ( -- * Translation into What4
     TransState(..)
-  , TransM(..)
+  , TransM
+  , runTransM
   , translateExpr
   , translateExprAt
     -- * What4 representations of Copilot expressions
@@ -118,6 +119,26 @@ newtype TransM sym a = TransM { unTransM :: StateT (TransState sym) IO a }
            , MonadIO
            , MonadState (TransState sym)
            )
+
+-- | Translate a Copilot specification using the given 'TransM' computation.
+runTransM :: WI.IsSymExprBuilder sym => sym -> CS.Spec -> TransM sym a -> IO a
+runTransM sym spec m = do
+  -- Build up initial translation state
+  let streamMap = Map.fromList $
+        (\stream -> (CS.streamId stream, stream)) <$> CS.specStreams spec
+  pow <- WI.freshTotalUninterpFn sym (WI.safeSymbol "pow") knownRepr knownRepr
+  logb <- WI.freshTotalUninterpFn sym (WI.safeSymbol "logb") knownRepr knownRepr
+  let st = TransState
+           { externVars = mempty
+           , externVarsAt = mempty
+           , streamConstants = mempty
+           , streams = streamMap
+           , pow = pow
+           , logb = logb
+           }
+
+  (res, _) <- runStateT (unTransM m) st
+  return res
 
 -- | Translate an expression into a what4 representation. The int offset keeps
 -- track of how many timesteps into the past each variable is referring to.

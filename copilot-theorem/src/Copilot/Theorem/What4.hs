@@ -76,8 +76,6 @@ import qualified What4.Solver.DReal     as WS
 import Control.Monad.State
 import qualified Data.BitVector.Sized as BV
 import Data.Foldable (foldrM)
-import qualified Data.Map as Map
-import Data.Parameterized.Classes
 import Data.Parameterized.NatRepr
 import Data.Parameterized.Nonce
 import Data.Parameterized.Some
@@ -125,13 +123,6 @@ prove solver spec = do
     Yices -> WC.extendConfig WS.yicesOptions (WI.getConfiguration sym)
     Z3 -> WC.extendConfig WS.z3Options (WI.getConfiguration sym)
 
-  -- Build up initial translation state
-  let streamMap = Map.fromList $
-        (\stream -> (CS.streamId stream, stream)) <$> CS.specStreams spec
-  pow <- WI.freshTotalUninterpFn sym (WI.safeSymbol "pow") knownRepr knownRepr
-  logb <- WI.freshTotalUninterpFn sym (WI.safeSymbol "logb") knownRepr knownRepr
-  let st = TransState Map.empty Map.empty Map.empty streamMap pow logb
-
   -- Define TransM action for proving properties. Doing this in TransM rather
   -- than IO allows us to reuse the state for each property.
   let proveProperties = forM (CS.specProperties spec) $ \pr -> do
@@ -170,8 +161,7 @@ prove solver spec = do
             WS.Unknown -> return (CS.propertyName pr, Unknown)
 
   -- Execute the action and return the results for each property
-  (res, _) <- runStateT (unTransM proveProperties) st
-  return res
+  runTransM sym spec proveProperties
   where
     expectedBool :: forall m sym a.
                     (Panic.HasCallStack, MonadIO m, WI.IsExprBuilder sym)

@@ -1,0 +1,3 @@
+[submodule "language-bluespec"]
+	path = language-bluespec
+	url = git@github.com:GaloisInc/language-bluespec.git

@@ -4,14 +4,16 @@ module Copilot.Compile.Bluespec.Compile
   , compileWith
   ) where
 
-import System.Directory     (createDirectoryIfMissing)
-import System.Exit          (exitFailure)
-import System.FilePath      ((</>))
-import System.IO            (hPutStrLn, stderr)
+import Text.PrettyPrint.HughesPJClass (Pretty (..), render)
+import System.Directory               (createDirectoryIfMissing)
+import System.Exit                    (exitFailure)
+import System.FilePath                ((</>))
+import System.IO                      (hPutStrLn, stderr)
+
+import Language.Bluespec.Classic.AST
 
 import Copilot.Core
 import Copilot.Core.Extra
-
 import Copilot.Compile.Bluespec.Util (guardname)
 import Copilot.Compile.Bluespec.External
 import Copilot.Compile.Bluespec.Settings
@@ -27,16 +29,16 @@ compileWith bluespecSettings prefix spec
   | null (specTriggers spec)
   = do hPutStrLn stderr $
          "Copilot error: attempt at compiling empty specification.\n"
-         ++ "You must define at least one trigger to generate C monitors."
+         ++ "You must define at least one trigger to generate Bluespec monitors."
        exitFailure
 
   | otherwise
-  = do let cfile = compilec bluespecSettings prefix spec
+  = do let bsFile = render $ pPrint $ compileBS bluespecSettings prefix spec
 
        let dir = bluespecSettingsOutputDirectory bluespecSettings
        createDirectoryIfMissing True dir
 
-       writeFile (dir </> prefix ++ ".bs") $ cfile
+       writeFile (dir </> prefix ++ ".bs") bsFile
 
 -- | Compile a specification to a Bluespec
 --
@@ -46,8 +48,8 @@ compile :: String -> Spec -> IO ()
 compile = compileWith mkDefaultBluespecSettings
 
 -- | Generate the .bs file from a 'Spec'.
-compilec :: BluespecSettings -> String -> Spec -> String
-compilec bluespecSettings prefix spec = unlines
+compileBS :: BluespecSettings -> String -> Spec -> CPackage
+compileBS bluespecSettings prefix spec = error "TODO RGS" $ unlines
     [ packageDecl
     , ""
     , imports

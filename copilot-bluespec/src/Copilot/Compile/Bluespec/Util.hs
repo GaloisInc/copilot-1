@@ -12,7 +12,7 @@ module Copilot.Compile.Bluespec.Util
 
 import Copilot.Core  (Id)
 
--- | Turn a stream id into a suitable C variable name.
+-- | Turn a stream id into a suitable Bluespec variable name.
 streamname :: Id -> String
 streamname sid = "s" ++ show sid
 

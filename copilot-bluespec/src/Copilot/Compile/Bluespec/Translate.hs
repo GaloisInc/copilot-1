@@ -1,4 +1,5 @@
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 -- | Translate Copilot Core expressions and operators to Bluespec.
 module Copilot.Compile.Bluespec.Translate
@@ -6,14 +7,20 @@ module Copilot.Compile.Bluespec.Translate
   where
 
 import Control.Monad.State
+import Data.String (IsString (..))
+
+import qualified Language.Bluespec.Classic.AST as BS
+import qualified Language.Bluespec.Classic.AST.Builtin.Ids as BS
+import qualified Language.Bluespec.Classic.AST.Builtin.Types as BS
 
 import Copilot.Core
 import Copilot.Compile.Bluespec.Error (impossible)
 import Copilot.Compile.Bluespec.Util (streamaccessorname, excpyname)
 
 -- | Translates a Copilot Core expression into a Bluespec expression.
-transExpr :: Expr a -> String
-transExpr (Const ty x) = showWithType' ty x
+transExpr :: Expr a -> BS.CExpr
+transExpr (Const ty x) = constty ty x
+{-
 transExpr (Op1 op e) = transOp1 op ++ "(" ++ transExpr e ++ ")"
 transExpr (Op2 op e1 e2) = transOp2 op ++ " "
                                        ++ "(" ++ transExpr e1 ++ ")"
@@ -25,6 +32,7 @@ transExpr (Op3 op e1 e2 e3) = transOp3 op ++ " "
                                           ++ "(" ++ transExpr e2 ++ ")"
                                           ++ " "
                                           ++ "(" ++ transExpr e3 ++ ")"
+-}
 
 -- Cases not handled
 --
@@ -169,3 +177,106 @@ showWit t =
     Array t -> ShowWit
     Struct t -> ShowWit
 
+-- | Transform a Copilot Core literal, based on its value and type, into a
+-- Bluespec literal.
+constty :: Type a -> a -> BS.CExpr
+constty ty =
+  case ty of
+    Bool      -> \v -> BS.CCon (if v then BS.idTrue else BS.idFalse) []
+    Int8      -> cLit . BS.LInt . BS.ilDec . toInteger
+    Int16     -> cLit . BS.LInt . BS.ilDec . toInteger
+    Int32     -> cLit . BS.LInt . BS.ilDec . toInteger
+    Int64     -> cLit . BS.LInt . BS.ilDec . toInteger
+    Word8     -> cLit . BS.LInt . BS.ilDec . toInteger
+    Word16    -> cLit . BS.LInt . BS.ilDec . toInteger
+    Word32    -> cLit . BS.LInt . BS.ilDec . toInteger
+    Word64    -> cLit . BS.LInt . BS.ilDec . toInteger
+    Float     -> cLit . BS.LReal . realToFrac
+    Double    -> cLit . BS.LReal
+    Array ty' -> \v ->
+      BS.Cdo False $ BS.CSletrec [array_temp_new]
+                   : zipWith
+                       (array_temp_assign ty')
+                       [0..tylength ty - 1]
+                       (arrayelems v)
+      where
+        array_temp :: BS.Id
+        array_temp = BS.mkId BS.NoPos "array_temp"
+
+        -- let array_temp = newVector;
+        array_temp_new :: BS.CDefl
+        array_temp_new =
+          BS.CLValue
+            array_temp
+            [ BS.CClause [] [] $
+              BS.CVar $ BS.mkId BS.NoPos "newVector"
+            ]
+            []
+
+        -- array_temp[i] = rhs;
+        array_temp_assign :: Type a -> Int -> a -> BS.CStmt
+        array_temp_assign ty'' i rhs =
+          BS.CSExpr Nothing $
+          BS.Cwrite
+            BS.NoPos
+            (BS.CSub
+              BS.NoPos
+              (BS.CVar array_temp)
+              (cLit $ BS.LInt $ BS.ilDec $ toInteger i))
+            (constty ty'' rhs)
+    Struct s -> \v ->
+      BS.CStruct
+        (Just True)
+        (BS.mkId BS.NoPos $ fromString $ typename s)
+        (map (\(Value ty'' field@(Field val)) ->
+               ( BS.mkId BS.NoPos $ fromString $ fieldname field
+               , constty ty'' val
+               ))
+             (toValues v))
+  where
+    cLit = BS.CLit . BS.CLiteral BS.NoPos
+
+-- | Translate a Copilot type to a Bluespec type.
+transtype :: Type a -> BS.CType
+transtype ty = case ty of
+  Bool      -> BS.tBool
+  Int8      -> BS.tInt  `BS.TAp` BS.cTNum  8 BS.NoPos
+  Int16     -> BS.tInt  `BS.TAp` BS.cTNum 16 BS.NoPos
+  Int32     -> BS.tInt  `BS.TAp` BS.cTNum 32 BS.NoPos
+  Int64     -> BS.tInt  `BS.TAp` BS.cTNum 64 BS.NoPos
+  Word8     -> BS.tUInt `BS.TAp` BS.cTNum  8 BS.NoPos
+  Word16    -> BS.tUInt `BS.TAp` BS.cTNum 16 BS.NoPos
+  Word32    -> BS.tUInt `BS.TAp` BS.cTNum 32 BS.NoPos
+  Word64    -> BS.tUInt `BS.TAp` BS.cTNum 64 BS.NoPos
+  Float     -> tODOFloats
+  Double    -> BS.tReal
+  Array ty' -> tVector `BS.TAp` BS.cTNum length BS.NoPos `BS.TAp` transtype ty'
+    where
+      length = fromIntegral $ tylength ty
+  Struct s  -> BS.TCon $
+    BS.TyCon
+      { BS.tcon_name = BS.mkId BS.NoPos $ fromString $ typename s
+      , BS.tcon_kind = Just BS.KStar
+      , BS.tcon_sort =
+          BS.TIstruct BS.SStruct $
+          map (\(Value _tu field) ->
+                BS.mkId BS.NoPos $
+                fromString $
+                fieldname field)
+              (toValues s)
+      }
+
+tVector :: BS.CType
+tVector = BS.TCon $
+  BS.TyCon
+    { BS.tcon_name = BS.idVector
+    , BS.tcon_kind = Just (BS.Kfun BS.KNum (BS.Kfun BS.KStar BS.KStar))
+    , BS.tcon_sort =
+        BS.TIdata
+          { BS.tidata_cons = [BS.mkId BS.NoPos "V"]
+          , BS.tidata_enum = False
+          }
+    }
+
+tODOFloats :: a
+tODOFloats = error "TODO: Floats"

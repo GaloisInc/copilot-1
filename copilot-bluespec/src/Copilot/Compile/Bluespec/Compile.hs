@@ -1,16 +1,21 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 -- | Compile Copilot specifications to Bluespec code.
 module Copilot.Compile.Bluespec.Compile
   ( compile
   , compileWith
   ) where
 
+import Data.String                    (IsString (..))
 import Text.PrettyPrint.HughesPJClass (Pretty (..), render)
 import System.Directory               (createDirectoryIfMissing)
 import System.Exit                    (exitFailure)
 import System.FilePath                ((</>))
 import System.IO                      (hPutStrLn, stderr)
 
-import Language.Bluespec.Classic.AST
+import qualified Language.Bluespec.Classic.AST as BS
+import qualified Language.Bluespec.Classic.AST.Builtin.Ids as BS
+import qualified Language.Bluespec.Classic.AST.Builtin.Types as BS
 
 import Copilot.Core
 import Copilot.Core.Extra
@@ -48,34 +53,77 @@ compile :: String -> Spec -> IO ()
 compile = compileWith mkDefaultBluespecSettings
 
 -- | Generate the .bs file from a 'Spec'.
-compileBS :: BluespecSettings -> String -> Spec -> CPackage
-compileBS bluespecSettings prefix spec = error "TODO RGS" $ unlines
-    [ packageDecl
-    , ""
-    , imports
-    , ""
-    , moduleDef
-    ]
+compileBS :: BluespecSettings -> String -> Spec -> BS.CPackage
+compileBS bluespecSettings prefix spec =
+  BS.CPackage
+    (i (fromString prefix))
+    (Right [])
+    imports
+    []
+    [moduleDef]
+    []
   where
+    -- TODO RGS: Hmmmmm
+    i :: BS.FString -> BS.Id
+    i = BS.mkId BS.NoPos
 
-    packageDecl = "package " ++ prefix ++ " where"
+    -- TODO RGS: Hmmmmm
+    tyCon :: BS.Id -> BS.Kind -> BS.TISort -> BS.Type
+    tyCon name k s = BS.TCon $
+      BS.TyCon { BS.tcon_name = name
+               , BS.tcon_kind = Just k
+               , BS.tcon_sort = s
+               }
 
-    imports = "import Real"
+    -- TODO RGS: Hmmmmm
+    stringExpr :: String -> BS.CExpr
+    stringExpr = BS.CLit . BS.CLiteral BS.NoPos . BS.LString
 
-    moduleDef = unlines $
-      [ "-- Module definition"
-      , ""
-      , "mkCopilotMonitor :: Module Empty"
-      , "mkCopilotMonitor ="
-      , "  module"
+    imports :: [BS.CImport]
+    imports =
+      [ BS.CImpId False (i "Real")
       ]
-      ++
-      registers
-      ++
-      variables
-      ++
-      rules
 
+    moduleDef :: BS.CDefn
+    moduleDef = BS.CValueSign $
+      BS.CDef
+        (i "mkCopilotMonitor")
+        -- :: Module Empty
+        (BS.CQType
+          []
+          (BS.tModule `BS.TAp` tyCon BS.idEmpty BS.KStar (BS.TIstruct (BS.SInterface []) [])))
+        [ BS.CClause [] [] $
+          BS.Cmodule BS.NoPos
+           -- TODO RGS: Registers
+           -- TODO RGS: Variables
+           [ BS.CMrules $
+             BS.Crules [] rules
+           ]
+        ]
+
+    rules :: [BS.CRule]
+    rules = map (rule streams) triggers
+
+    rule :: [Stream] -> Trigger -> BS.CRule
+    rule streams trigger =
+        BS.CRule
+          []
+          (Just (stringExpr ruleName))
+          [ BS.CQFilter $
+            BS.CVar $ i $ fromString $ guardname name
+          ]
+          (BS.Cdo
+            False
+            [ BS.CSExpr Nothing $
+              BS.CApply
+                (BS.CVar BS.idDisplay)
+                [stringExpr ("Violation: " ++ name)]
+            ])
+      where
+        ruleName = "Monitor" ++ name
+        (Trigger name guard args) = trigger
+
+    {-
     -- One register definition per extern
     registers = map ("    " ++ ) $ map regDecl exts
     regDecl _ = ""
@@ -86,26 +134,7 @@ compileBS bluespecSettings prefix spec = error "TODO RGS" $ unlines
         triggergen (Trigger name guard args) = guarddef
           where
             guarddef = genfun (guardname name) guard Bool
-
-    rules :: [String]
-    rules = map ("    " ++ ) $ "rules" : map ("  " ++ ) ruleContents
-
-    ruleContents = concatMap (rule streams) triggers
-
-    rule :: [Stream] -> Trigger -> [String]
-    rule streams trigger = [ ruleHeader, ruleBody ]
-      where
-        ruleHeader = concat
-                       [ "\"", ruleName, "\""
-                       , " : when (", guardname name, ") ==> do"
-                       ]
-
-        ruleBody   = unlines $
-                       map ("  " ++ )
-                         [ concat ["$display ", "\"Violation: ", name, "\""]
-                         ]
-        ruleName   = "Monitor" ++ name
-        (Trigger name guard args) = trigger
+    -}
 
     streams  = specStreams spec
     triggers = specTriggers spec

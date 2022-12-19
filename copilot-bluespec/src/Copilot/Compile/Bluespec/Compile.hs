@@ -56,17 +56,13 @@ compile = compileWith mkDefaultBluespecSettings
 compileBS :: BluespecSettings -> String -> Spec -> BS.CPackage
 compileBS bluespecSettings prefix spec =
   BS.CPackage
-    (i (fromString prefix))
+    (BS.mkId BS.NoPos (fromString prefix))
     (Right [])
     imports
     []
     [moduleDef]
     []
   where
-    -- TODO RGS: Hmmmmm
-    i :: BS.FString -> BS.Id
-    i = BS.mkId BS.NoPos
-
     -- TODO RGS: Hmmmmm
     tyCon :: BS.Id -> BS.Kind -> BS.TISort -> BS.Type
     tyCon name k s = BS.TCon $
@@ -81,13 +77,13 @@ compileBS bluespecSettings prefix spec =
 
     imports :: [BS.CImport]
     imports =
-      [ BS.CImpId False (i "Real")
+      [ BS.CImpId False (BS.mkId BS.NoPos "Real")
       ]
 
     moduleDef :: BS.CDefn
     moduleDef = BS.CValueSign $
       BS.CDef
-        (i "mkCopilotMonitor")
+        (BS.mkId BS.NoPos "mkCopilotMonitor")
         -- :: Module Empty
         (BS.CQType
           []
@@ -110,7 +106,8 @@ compileBS bluespecSettings prefix spec =
           []
           (Just (stringExpr ruleName))
           [ BS.CQFilter $
-            BS.CVar $ i $ fromString $ guardname name
+            BS.CVar $ BS.mkId BS.NoPos $
+            fromString $ guardname name
           ]
           (BS.Cdo
             False

@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -20,19 +21,10 @@ import Copilot.Compile.Bluespec.Util (streamaccessorname, excpyname)
 -- | Translates a Copilot Core expression into a Bluespec expression.
 transExpr :: Expr a -> BS.CExpr
 transExpr (Const ty x) = constty ty x
-{-
-transExpr (Op1 op e) = transOp1 op ++ "(" ++ transExpr e ++ ")"
-transExpr (Op2 op e1 e2) = transOp2 op ++ " "
-                                       ++ "(" ++ transExpr e1 ++ ")"
-                                       ++ " "
-                                       ++ "(" ++ transExpr e2 ++ ")"
-transExpr (Op3 op e1 e2 e3) = transOp3 op ++ " "
-                                          ++ "(" ++ transExpr e1 ++ ")"
-                                          ++ " "
-                                          ++ "(" ++ transExpr e2 ++ ")"
-                                          ++ " "
-                                          ++ "(" ++ transExpr e3 ++ ")"
--}
+transExpr (Op1 op e) = transOp1 op (transExpr e)
+transExpr (Op2 op e1 e2) = transOp2 op (transExpr e1) (transExpr e2)
+transExpr (Op3 op e1 e2 e3) =
+  transOp3 op (transExpr e1) (transExpr e2) (transExpr e3)
 
 -- Cases not handled
 --
@@ -59,129 +51,108 @@ transExpr (Op3 op e1 e2 e3) = transOp3 op ++ " "
 --
 -- transexpr (Var _ n) = return $ C.Ident n
 
--- | Translates a Copilot unary operator into a Bluespec function.
-transOp1 :: Op1 a b -> String
-transOp1 op =
+-- | Translates a Copilot unary operator and its argument into a Bluespec
+-- function.
+transOp1 :: Op1 a b -> BS.CExpr -> BS.CExpr
+transOp1 op e =
   case op of
-    Not         -> "not"
-    Abs     _ty -> "abs"
-    Sign    _ty -> "sign"
-    Recip   _ty -> "inv"
-    Acos    _ty -> "acos"
-    Asin    _ty -> "asin"
-    Atan    _ty -> "atan"
-    Cos     _ty -> "cos"
-    Sin     _ty -> "sin"
-    Tan     _ty -> "tan"
-    Acosh   _ty -> "acosh"
-    Asinh   _ty -> "asinh"
-    Atanh   _ty -> "atanh"
-    Cosh    _ty -> "cosh"
-    Sinh    _ty -> "sinh"
-    Tanh    _ty -> "tanh"
-    Exp     _ty -> "exp"
-    Log     _ty -> "log"
-    Sqrt    _ty -> "sqrt"
-    Ceiling _ty -> "ceil"
-    Floor   _ty -> "floor"
-    BwNot   _ty -> "(~)"
+    Not         -> app BS.idNot
+    Abs     _ty -> app $ BS.mkId BS.NoPos "abs"
+    Sign    _ty -> app $ BS.mkId BS.NoPos "signum"
 
-    -- Cases not handled
-    --   Cast     _ ty -> C.Cast (transtypename ty) e
-    --   GetField (Struct _)  _ f -> C.Dot e (accessorname f)
+    -- Bluespec's Arith class does not have a `recip` method corresponding to
+    -- Haskell's `recip` in the `Fractional` class, so we implement it
+    -- ourselves.
+    Recip    ty -> BS.CApply
+                     (BS.CVar (BS.idSlashAt BS.NoPos))
+                     [constNumTy ty 1, e]
+    Acos    _ty -> app $ BS.mkId BS.NoPos "acos"
+    Asin    _ty -> app $ BS.mkId BS.NoPos "asin"
+    Atan    _ty -> app $ BS.mkId BS.NoPos "atan"
+    Cos     _ty -> app $ BS.mkId BS.NoPos "cos"
+    Sin     _ty -> app $ BS.mkId BS.NoPos "sin"
+    Tan     _ty -> app $ BS.mkId BS.NoPos "tan"
+    Acosh   _ty -> app $ BS.mkId BS.NoPos "acosh"
+    Asinh   _ty -> app $ BS.mkId BS.NoPos "asinh"
+    Atanh   _ty -> app $ BS.mkId BS.NoPos "atanh"
+    Cosh    _ty -> app $ BS.mkId BS.NoPos "cosh"
+    Sinh    _ty -> app $ BS.mkId BS.NoPos "sinh"
+    Tanh    _ty -> app $ BS.mkId BS.NoPos "tanh"
+    Exp     _ty -> app $ BS.mkId BS.NoPos "exp_e"
+    Log     _ty -> app $ BS.mkId BS.NoPos "log"
+    Sqrt    _ty -> app $ BS.mkId BS.NoPos "sqrt"
 
--- | Translates a Copilot binary operator into a Bluespec function.
-transOp2 :: Op2 a b c -> String
-transOp2 op =
-  case op of
-    And          -> "(&&)"
-    Or           -> "(||)"
-    Add      _ty -> "(+)"
-    Sub      _ty -> "(-)"
-    Mul      _ty -> "(*)"
-    Mod      _ty -> "(%)"
-    Div      _ty -> "(/)"
-    Fdiv     _ty -> "(/)"
-    Pow      _ty -> "(^)"
-    Logb     _ty -> "\\e1 e2 -> log e1 / log e2"
-    Atan2    _ty -> "atan2"
-    Eq       _   -> "(==)"
-    Ne       _   -> "(/=)"
-    Le       _   -> "(<=)"
-    Ge       _   -> "(>=)"
-    Lt       _   -> "(<)"
-    Gt       _   -> "(>)"
-    BwAnd    _   -> "(&)"
-    BwOr     _   -> "(|)"
-    BwXor    _   -> "(^)"
-    BwShiftL _ _ -> "(<<)"
-    BwShiftR _ _ -> "(>>)"
+    -- Bluespec's `ceil` and `floor` functions return an `Integer` instead
+    -- of a `Real`, so we must explicitly cast the result to an `Integer` using
+    -- `fromInteger`.
+    Ceiling _ty -> BS.CApply
+                     (BS.CVar (BS.idFromInteger BS.NoPos))
+                     [BS.CApply
+                       (BS.CVar (BS.mkId BS.NoPos "ceil"))
+                       [e]]
+    Floor   _ty -> BS.CApply
+                     (BS.CVar (BS.idFromInteger BS.NoPos))
+                     [BS.CApply
+                       (BS.CVar (BS.mkId BS.NoPos "floor"))
+                       [e]]
 
--- Cases not handled
---   Index    _   -> C.Index e1 e2
-
--- | Translates a Copilot ternary operator into a Bluespec function.
-transOp3 :: Op3 a b c d -> String
-transOp3 op =
-  case op of
-    Mux _ -> "(\\x y z -> if x then y else z)"
-
--- * Auxiliary showing function for constant values
-
--- | Show a value. The representation depends on the type and the target
--- language. Booleans are represented differently depending on the backend.
-showWithType' :: Type a -> a -> String
-showWithType' t x = sw
+    BwNot   _ty -> app $ BS.idInvertAt BS.NoPos
+    Cast   _ ty -> transCast ty e
+    GetField (Struct _)  _ f -> BS.CSelect e $ BS.mkId BS.NoPos $
+                                fromString $ accessorname f
   where
-    sw = case showWit t of
-           ShowWit -> show x
+    app i = BS.CApply (BS.CVar i) [e]
 
--- | Show Copilot Core type.
-showType :: Type a -> String
-showType t =
-  case t of
-    Bool   -> "Bool"
-    Int8   -> "Int8"
-    Int16  -> "Int16"
-    Int32  -> "Int32"
-    Int64  -> "Int64"
-    Word8  -> "Word8"
-    Word16 -> "Word16"
-    Word32 -> "Word32"
-    Word64 -> "Word64"
-    Float  -> "Float"
-    Double -> "Double"
-    Array t -> "Array " ++ showType t
-    Struct t -> "Struct"
+-- | Translates a Copilot binary operator and its arguments into a Bluespec
+-- function.
+transOp2 :: Op2 a b c -> BS.CExpr -> BS.CExpr -> BS.CExpr
+transOp2 op e1 e2 =
+  case op of
+    And          -> app BS.idAnd
+    Or           -> app $ BS.idOrAt BS.NoPos
+    Add      _ty -> app BS.idPlus
+    Sub      _ty -> app BS.idMinus
+    Mul      _ty -> app $ BS.idStarAt BS.NoPos
+    Mod      _ty -> app $ BS.idPercentAt BS.NoPos
+    Div      _ty -> app $ BS.idSlashAt BS.NoPos
+    Fdiv     _ty -> app $ BS.idSlashAt BS.NoPos
+    Pow      _ty -> app $ BS.idStarStarAt BS.NoPos
+    Logb     _ty -> app $ BS.mkId BS.NoPos "logb"
+    Atan2    _ty -> app $ BS.mkId BS.NoPos "atan2"
+    Eq       _   -> app BS.idEqual
+    Ne       _   -> app BS.idNotEqual
+    Le       _   -> app $ BS.idLtEqAt BS.NoPos
+    Ge       _   -> app $ BS.idGtEqAt BS.NoPos
+    Lt       _   -> app $ BS.idLtAt BS.NoPos
+    Gt       _   -> app $ BS.idGtAt BS.NoPos
+    BwAnd    _   -> app $ BS.idBitAndAt BS.NoPos
+    BwOr     _   -> app $ BS.idBitOrAt BS.NoPos
+    BwXor    _   -> app $ BS.idCaretAt BS.NoPos
+    BwShiftL _ _ -> app $ BS.idLshAt BS.NoPos
+    BwShiftR _ _ -> app $ BS.idRshAt BS.NoPos
+    Index    _   -> BS.CSub BS.NoPos e1 e2
+  where
+    app i = BS.CApply (BS.CVar i) [e1, e2]
 
--- * Auxiliary show instance
+-- | Translates a Copilot ternary operator and its arguments into a Bluespec
+-- function.
+transOp3 :: Op3 a b c d -> BS.CExpr -> BS.CExpr -> BS.CExpr -> BS.CExpr
+transOp3 op e1 e2 e3 =
+  case op of
+    Mux _ -> BS.Cif BS.NoPos e1 e2 e3
 
--- | Witness datatype for showing a value, used by 'showWithType'.
-data ShowWit a = Show a => ShowWit
-
--- | Turn a type into a show witness.
-showWit :: Type a -> ShowWit a
-showWit t =
-  case t of
-    Bool   -> ShowWit
-    Int8   -> ShowWit
-    Int16  -> ShowWit
-    Int32  -> ShowWit
-    Int64  -> ShowWit
-    Word8  -> ShowWit
-    Word16 -> ShowWit
-    Word32 -> ShowWit
-    Word64 -> ShowWit
-    Float  -> ShowWit
-    Double -> ShowWit
-    Array t -> ShowWit
-    Struct t -> ShowWit
+-- | TODO RGS: Finish me
+transCast :: Type a -> BS.CExpr -> BS.CExpr
+transCast = error "TODO RGS: transCast"
 
 -- | Transform a Copilot Core literal, based on its value and type, into a
 -- Bluespec literal.
 constty :: Type a -> a -> BS.CExpr
 constty ty =
   case ty of
+    -- The treatment of scalar types is relatively straightforward. Note that
+    -- Bool is an enum, so we must construct it using a CCon rather than with
+    -- a CLit.
     Bool      -> \v -> BS.CCon (if v then BS.idTrue else BS.idFalse) []
     Int8      -> cLit . BS.LInt . BS.ilDec . toInteger
     Int16     -> cLit . BS.LInt . BS.ilDec . toInteger
@@ -193,37 +164,31 @@ constty ty =
     Word64    -> cLit . BS.LInt . BS.ilDec . toInteger
     Float     -> cLit . BS.LReal . realToFrac
     Double    -> cLit . BS.LReal
+
+    -- Translating a Copilot array literal to a Bluespec Vector is somewhat
+    -- involved. Given a Copilot array {x_0, ..., x_(n-1)}, the
+    -- corresponding Bluespec Vector will look something like:
+    --
+    --   let arr = update (... (update newVector 0 x_0)) (n-1) x_(n-1)
+    --
+    -- We use the `update` function instead of the := syntax (e.g.,
+    -- { array_temp[0] := x; array_temp[1] := y; ...}) so that we can construct
+    -- a Vector in a pure context.
     Array ty' -> \v ->
-      BS.Cdo False $ BS.CSletrec [array_temp_new]
-                   : zipWith
-                       (array_temp_assign ty')
-                       [0..tylength ty - 1]
-                       (arrayelems v)
-      where
-        array_temp :: BS.Id
-        array_temp = BS.mkId BS.NoPos "array_temp"
+      snd $
+      foldr
+        (\x (!i, !v) ->
+          ( i+1
+          , BS.CApply
+              (BS.CVar (BS.mkId BS.NoPos "update"))
+              [v, cLit (BS.LInt (BS.ilDec i)), constty ty' x]
+          ))
+        (0, BS.CVar (BS.mkId BS.NoPos "newVector"))
+        (arrayelems v)
 
-        -- let array_temp = newVector;
-        array_temp_new :: BS.CDefl
-        array_temp_new =
-          BS.CLValue
-            array_temp
-            [ BS.CClause [] [] $
-              BS.CVar $ BS.mkId BS.NoPos "newVector"
-            ]
-            []
-
-        -- array_temp[i] = rhs;
-        array_temp_assign :: Type a -> Int -> a -> BS.CStmt
-        array_temp_assign ty'' i rhs =
-          BS.CSExpr Nothing $
-          BS.Cwrite
-            BS.NoPos
-            (BS.CSub
-              BS.NoPos
-              (BS.CVar array_temp)
-              (cLit $ BS.LInt $ BS.ilDec $ toInteger i))
-            (constty ty'' rhs)
+    -- Converting a Copilot struct { field_0 = x_0, ..., field_(n-1) = x_(n-1) }
+    -- to a Bluespec struct is quite straightforward, given Bluespec's struct
+    -- initialization syntax.
     Struct s -> \v ->
       BS.CStruct
         (Just True)
@@ -266,6 +231,19 @@ transtype ty = case ty of
               (toValues s)
       }
 
+-- Translate a literal number of type @ty@ into a Bluespec literal.
+--
+-- PRE: The type of PRE is numeric (integer or floating-point), that
+-- is, not boolean, struct or array.
+constNumTy :: Type a -> Integer -> BS.CExpr
+constNumTy ty =
+  case ty of
+    Float  -> cLit . BS.LReal . fromInteger
+    Double -> cLit . BS.LReal . fromInteger
+    _      -> cLit . BS.LInt . BS.ilDec
+  where
+    cLit = BS.CLit . BS.CLiteral BS.NoPos
+
 tVector :: BS.CType
 tVector = BS.TCon $
   BS.TyCon
@@ -279,4 +257,4 @@ tVector = BS.TCon $
     }
 
 tODOFloats :: a
-tODOFloats = error "TODO: Floats"
+tODOFloats = error "TODO RGS: Floats"

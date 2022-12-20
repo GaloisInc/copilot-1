@@ -64,20 +64,13 @@ compileBS bluespecSettings prefix spec =
     []
   where
     -- TODO RGS: Hmmmmm
-    tyCon :: BS.Id -> BS.Kind -> BS.TISort -> BS.Type
-    tyCon name k s = BS.TCon $
-      BS.TyCon { BS.tcon_name = name
-               , BS.tcon_kind = Just k
-               , BS.tcon_sort = s
-               }
-
-    -- TODO RGS: Hmmmmm
     stringExpr :: String -> BS.CExpr
     stringExpr = BS.CLit . BS.CLiteral BS.NoPos . BS.LString
 
     imports :: [BS.CImport]
     imports =
       [ BS.CImpId False (BS.mkId BS.NoPos "Real")
+      , BS.CImpId False (BS.mkId BS.NoPos "Vector")
       ]
 
     moduleDef :: BS.CDefn
@@ -87,11 +80,17 @@ compileBS bluespecSettings prefix spec =
         -- :: Module Empty
         (BS.CQType
           []
-          (BS.tModule `BS.TAp` tyCon BS.idEmpty BS.KStar (BS.TIstruct (BS.SInterface []) [])))
+          (BS.tModule `BS.TAp`
+           BS.TCon (BS.TyCon
+                     { BS.tcon_name = BS.idEmpty
+                     , BS.tcon_kind = Just BS.KStar
+                     , BS.tcon_sort = BS.TIstruct (BS.SInterface []) []
+                     })))
         [ BS.CClause [] [] $
-          BS.Cmodule BS.NoPos
+          BS.Cmodule BS.NoPos $
            -- TODO RGS: Registers
-           -- TODO RGS: Variables
+           [ BS.CMStmt $ BS.CSletrec variables
+           ] ++
            [ BS.CMrules $
              BS.Crules [] rules
            ]
@@ -124,7 +123,15 @@ compileBS bluespecSettings prefix spec =
     -- One register definition per extern
     registers = map ("    " ++ ) $ map regDecl exts
     regDecl _ = ""
+    -}
 
+    variables :: [BS.CDefl]
+    variables = map triggergen triggers
+      where
+        triggergen :: Trigger -> BS.CDefl
+        triggergen (Trigger name guard args) =
+          genfun (guardname name) guard Bool
+    {-
     variables = map ("    " ++ ) $ concatMap triggergen triggers
       where
         triggergen :: Trigger -> [String]

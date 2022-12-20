@@ -16,7 +16,6 @@ import Copilot.Compile.Bluespec.Translate
 
 -- | Write a generator function for a stream.
 genfun :: Show a => String -> Expr a -> Type a -> BS.CDefl
--- genfun name expr ty = [ "let " ++ name ++ " = " ++ transExpr expr ]
 genfun name expr ty =
   BS.CLValue
     (BS.mkId BS.NoPos $ fromString name)

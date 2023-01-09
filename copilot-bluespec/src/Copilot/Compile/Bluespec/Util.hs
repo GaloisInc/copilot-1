@@ -1,20 +1,15 @@
 -- | Auxiliary helper functions to generate Bluespec code.
-module Copilot.Compile.Bluespec.Util
-    ( streamaccessorname
-    , excpyname
-    , streamname
-    , indexname
-    , generatorname
-    , guardname
-    , argnames
-    )
-  where
+module Copilot.Compile.Bluespec.Util where
 
-import Copilot.Core  (Id)
+import Copilot.Core (Id)
 
 -- | Turn a stream id into a suitable Bluespec variable name.
 streamname :: Id -> String
 streamname sid = "s" ++ show sid
+
+-- | Turn a stream id into a stream element name.
+streamelemname :: Id -> Int -> String
+streamelemname sid n = streamname sid ++ "_" ++ show n
 
 -- | Turn a stream id into the global varname for indices.
 indexname :: Id -> String
@@ -23,10 +18,6 @@ indexname sid = streamname sid ++ "_idx"
 -- | Turn a stream id into the name of its accessor function
 streamaccessorname :: Id -> String
 streamaccessorname sid = streamname sid ++ "_get"
-
--- | Add a postfix for copies of external variables the name.
-excpyname :: String -> String
-excpyname name = name ++ "_cpy"
 
 -- | Turn stream id into name of its generator function.
 generatorname :: Id -> String
@@ -48,3 +39,7 @@ argTempName name n = name ++ "_arg_temp" ++ show n
 -- | Enumerate all argument names based on trigger name.
 argnames :: String -> [String]
 argnames base = map (argname base) [0..]
+
+-- | Turn a specification name into the name of its module interface
+specinterfacename :: String -> String
+specinterfacename prefix = prefix ++ "Ifc"

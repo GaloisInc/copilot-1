@@ -1,11 +1,8 @@
-{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Translate Copilot Core expressions and operators to Bluespec.
-module Copilot.Compile.Bluespec.Translate
-    (transExpr)
-  where
+module Copilot.Compile.Bluespec.Translate where
 
 import Control.Monad.State
 import Data.String (IsString (..))
@@ -16,40 +13,43 @@ import qualified Language.Bluespec.Classic.AST.Builtin.Types as BS
 
 import Copilot.Core
 import Copilot.Compile.Bluespec.Error (impossible)
-import Copilot.Compile.Bluespec.Util (streamaccessorname, excpyname)
+import Copilot.Compile.Bluespec.Util
 
 -- | Translates a Copilot Core expression into a Bluespec expression.
 transExpr :: Expr a -> BS.CExpr
 transExpr (Const ty x) = constty ty x
+
+transExpr (Local ty1 _ name e1 e2) =
+  let e1'  = transExpr e1
+      cty1 = transtype ty1
+      e2'  = transExpr e2 in
+  BS.Cletrec
+    [ BS.CLValue
+        (BS.mkId BS.NoPos $ fromString name)
+        [ BS.CClause [] [] e1'
+        ]
+        []
+    ]
+    e2'
+
+transExpr (Var _ n) = BS.CVar $ BS.mkId BS.NoPos $ fromString n
+
+transExpr (Drop _ amount sid) =
+  let accessvar = streamaccessorname sid
+      index     = BS.LInt $ BS.ilDec $ fromIntegral amount in
+  BS.CApply (BS.CVar $ BS.mkId BS.NoPos $ fromString accessvar)
+            [BS.CLit $ BS.CLiteral BS.NoPos index]
+
+transExpr (ExternVar _ name _) = BS.CVar $ BS.mkId BS.NoPos $ fromString name
+
+transExpr (Label _ _ e) = transExpr e -- ignore label
+
 transExpr (Op1 op e) = transOp1 op (transExpr e)
+
 transExpr (Op2 op e1 e2) = transOp2 op (transExpr e1) (transExpr e2)
+
 transExpr (Op3 op e1 e2 e3) =
   transOp3 op (transExpr e1) (transExpr e2) (transExpr e3)
-
--- Cases not handled
---
--- transexpr (Drop _ amount sid) = do
---   let accessvar = streamaccessorname sid
---       index     = C.LitInt (fromIntegral amount)
---   return $ funcall accessvar [index]
---
--- transexpr (ExternVar _ name _) = return $ C.Ident (excpyname name)
---
--- Cases not handled -- but we don't really care much about them.
---
--- transexpr (Label _ _ e) = transexpr e -- ignore label
---
--- transexpr (Local ty1 _ name e1 e2) = do
---   e1' <- transexpr e1
---   let cty1 = transtype ty1
---       init = Just $ C.InitExpr e1'
---
---   -- Add variable to function environment
---   modify (`mappend` [C.VarDecln Nothing cty1 name init])
---
---   transexpr e2
---
--- transexpr (Var _ n) = return $ C.Ident n
 
 -- | Translates a Copilot unary operator and its argument into a Bluespec
 -- function.
@@ -130,7 +130,7 @@ transOp2 op e1 e2 =
     BwXor    _   -> app $ BS.idCaretAt BS.NoPos
     BwShiftL _ _ -> app $ BS.idLshAt BS.NoPos
     BwShiftR _ _ -> app $ BS.idRshAt BS.NoPos
-    Index    _   -> BS.CSub BS.NoPos e1 e2
+    Index    _   -> cSelect e1 e2
   where
     app i = BS.CApply (BS.CVar i) [e1, e2]
 
@@ -174,17 +174,7 @@ constty ty =
     -- We use the `update` function instead of the := syntax (e.g.,
     -- { array_temp[0] := x; array_temp[1] := y; ...}) so that we can construct
     -- a Vector in a pure context.
-    Array ty' -> \v ->
-      snd $
-      foldr
-        (\x (!i, !v) ->
-          ( i+1
-          , BS.CApply
-              (BS.CVar (BS.mkId BS.NoPos "update"))
-              [v, cLit (BS.LInt (BS.ilDec i)), constty ty' x]
-          ))
-        (0, BS.CVar (BS.mkId BS.NoPos "newVector"))
-        (arrayelems v)
+    Array ty' -> constvector ty' . arrayelems
 
     -- Converting a Copilot struct { field_0 = x_0, ..., field_(n-1) = x_(n-1) }
     -- to a Bluespec struct is quite straightforward, given Bluespec's struct
@@ -198,8 +188,16 @@ constty ty =
                , constty ty'' val
                ))
              (toValues v))
-  where
-    cLit = BS.CLit . BS.CLiteral BS.NoPos
+
+constvector :: Type a -> [a] -> BS.CExpr
+constvector ty vec =
+  foldr
+    (\(x, i) v ->
+      BS.CApply
+        (BS.CVar (BS.mkId BS.NoPos "update"))
+        [v, cLit (BS.LInt (BS.ilDec i)), constty ty x])
+    (BS.CVar (BS.mkId BS.NoPos "newVector"))
+    (zip vec [0..])
 
 -- | Translate a Copilot type to a Bluespec type.
 transtype :: Type a -> BS.CType
@@ -241,8 +239,15 @@ constNumTy ty =
     Float  -> cLit . BS.LReal . fromInteger
     Double -> cLit . BS.LReal . fromInteger
     _      -> cLit . BS.LInt . BS.ilDec
-  where
-    cLit = BS.CLit . BS.CLiteral BS.NoPos
+
+-- TODO RGS: The definitions below probably deserve another home
+
+cLit :: BS.Literal -> BS.CExpr
+cLit = BS.CLit . BS.CLiteral BS.NoPos
+
+cSelect :: BS.CExpr -> BS.CExpr -> BS.CExpr
+cSelect vec idx =
+  BS.CApply (BS.CVar (BS.mkId BS.NoPos "select")) [vec, idx]
 
 tVector :: BS.CType
 tVector = BS.TCon $

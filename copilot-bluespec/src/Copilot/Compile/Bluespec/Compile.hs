@@ -19,10 +19,11 @@ import qualified Language.Bluespec.Classic.AST.Builtin.Types as BS
 
 import Copilot.Core
 import Copilot.Core.Extra
-import Copilot.Compile.Bluespec.Util (guardname)
+import Copilot.Compile.Bluespec.CodeGen
 import Copilot.Compile.Bluespec.External
 import Copilot.Compile.Bluespec.Settings
-import Copilot.Compile.Bluespec.CodeGen
+import Copilot.Compile.Bluespec.Translate
+import Copilot.Compile.Bluespec.Util
 
 -- | Compile a specification to a Bluespec file.
 --
@@ -60,12 +61,12 @@ compileBS bluespecSettings prefix spec =
     (Right [])
     imports
     []
-    [moduleDef]
+    [ifcDef, moduleDef]
     []
   where
     -- TODO RGS: Hmmmmm
     stringExpr :: String -> BS.CExpr
-    stringExpr = BS.CLit . BS.CLiteral BS.NoPos . BS.LString
+    stringExpr = cLit . BS.LString
 
     imports :: [BS.CImport]
     imports =
@@ -76,25 +77,41 @@ compileBS bluespecSettings prefix spec =
     moduleDef :: BS.CDefn
     moduleDef = BS.CValueSign $
       BS.CDef
-        (BS.mkId BS.NoPos "mkCopilotMonitor")
-        -- :: Module Empty
+        (BS.mkId BS.NoPos $ fromString $ "mk" ++ prefix)
+        -- :: <prefix>Ifc -> Module Empty
         (BS.CQType
           []
-          (BS.tModule `BS.TAp`
-           BS.TCon (BS.TyCon
-                     { BS.tcon_name = BS.idEmpty
-                     , BS.tcon_kind = Just BS.KStar
-                     , BS.tcon_sort = BS.TIstruct (BS.SInterface []) []
-                     })))
-        [ BS.CClause [] [] $
-          BS.Cmodule BS.NoPos $
-           -- TODO RGS: Registers
-           [ BS.CMStmt $ BS.CSletrec variables
-           ] ++
-           [ BS.CMrules $
-             BS.Crules [] rules
-           ]
+          (BS.tArrow
+            `BS.TAp` BS.TCon (BS.TyCon
+                       { BS.tcon_name = ifcid
+                       , BS.tcon_kind = Just BS.KStar
+                       , BS.tcon_sort = BS.TIstruct
+                                          (BS.SInterface [])
+                                          (map BS.cf_name ifcfields)
+                       })
+            `BS.TAp` (BS.tModule `BS.TAp`
+                      BS.TCon (BS.TyCon
+                                { BS.tcon_name = BS.idEmpty
+                                , BS.tcon_kind = Just BS.KStar
+                                , BS.tcon_sort = BS.TIstruct (BS.SInterface []) []
+                                }))))
+        [ BS.CClause [BS.CPVar ifcmodid] [] $
+          BS.Cdo False
+            [ BS.CSBind (BS.CPVar ifcargid) Nothing [] (BS.CVar ifcmodid)
+              -- TODO RGS: Explain why we do this
+            , BS.CSletrec $ map bindifcfield ifcfields
+            , BS.CSExpr Nothing $
+              BS.Cmodule BS.NoPos $
+               [ BS.CMStmt $ BS.CSletrec $ genfuns streams triggers
+               ] ++
+               [ BS.CMrules $
+                 BS.Crules [] rules
+               ]
+            ]
         ]
+
+    ifcargid = BS.mkId BS.NoPos "ifc"
+    ifcmodid = BS.mkId BS.NoPos "ifcMod"
 
     rules :: [BS.CRule]
     rules = map (rule streams) triggers
@@ -119,27 +136,46 @@ compileBS bluespecSettings prefix spec =
         ruleName = "Monitor" ++ name
         (Trigger name guard args) = trigger
 
-    {-
     -- One register definition per extern
-    registers = map ("    " ++ ) $ map regDecl exts
-    regDecl _ = ""
-    -}
-
-    variables :: [BS.CDefl]
-    variables = map triggergen triggers
-      where
-        triggergen :: Trigger -> BS.CDefl
-        triggergen (Trigger name guard args) =
-          genfun (guardname name) guard Bool
+    -- TODO RGS: Registers should be passed in an interface.
     {-
-    variables = map ("    " ++ ) $ concatMap triggergen triggers
-      where
-        triggergen :: Trigger -> [String]
-        triggergen (Trigger name guard args) = guarddef
-          where
-            guarddef = genfun (guardname name) guard Bool
+    registers = map regDecl exts
+    regDecl _ = ""
     -}
 
     streams  = specStreams spec
     triggers = specTriggers spec
     exts     = gatherexts streams triggers
+
+    ifcid     = BS.mkId BS.NoPos $ fromString $ specinterfacename prefix
+    ifcfields = mkspecifcfields triggers exts
+
+    ifcDef :: BS.CDefn
+    ifcDef = BS.Cstruct
+               True
+               (BS.SInterface [])
+               (BS.IdK ifcid)
+               [] -- No type variables
+               ifcfields
+               [] -- No derived instances
+
+    bindifcfield :: BS.CField -> BS.CDefl
+    bindifcfield (BS.CField { BS.cf_name = name }) =
+      BS.CLValue name [BS.CClause [] [] (BS.CSelect (BS.CVar ifcmodid) name)] []
+
+    -- Make generator functions, including trigger arguments.
+    genfuns :: [Stream] -> [Trigger] -> [BS.CDefl]
+    genfuns streams triggers =  concatMap accessdecln streams
+                             ++ concatMap streamgen streams
+                             ++ concatMap triggergen triggers
+      where
+
+        accessdecln :: Stream -> [BS.CDefl]
+        accessdecln (Stream sid buff _ ty) = mkaccessdecln sid ty buff
+
+        streamgen :: Stream -> [BS.CDefl]
+        streamgen (Stream sid _ expr ty) = genfun (generatorname sid) expr ty
+
+        triggergen :: Trigger -> [BS.CDefl]
+        triggergen (Trigger name guard _) =
+          genfun (guardname name) guard Bool

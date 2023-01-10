@@ -70,6 +70,8 @@ are:
 Running this program will generate `Fibs.bs`, whose contents will look roughly
 like the following:
 
+TODO RGS: Update the code below once the codegen is finalized
+
 ```bluespec
 package Fibs where
 
@@ -135,6 +137,8 @@ triggers fire. `FibsIfc` contains everything that the user must supply;
 everything else is handled within the module that `mkFibs` returns.
 
 Here is an example of a larger application might look like:
+
+TODO RGS: Update the code below once the codegen is finalized
 
 ```bluespec
 package Top where
@@ -245,4 +249,9 @@ are three actions in the `Fibs.hs` example:
         s0_idx := (s0_idx + 1) % 2
 ```
 
-TODO RGS
+# Notes
+
+## Structs
+
+TODO RGS: We have to do some name mangling here to give struct names capital
+letters. Is there a better way?

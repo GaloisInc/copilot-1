@@ -141,11 +141,14 @@ mktriggerrule (Trigger name guard args) =
         BS.CVar $ BS.mkId BS.NoPos $
         fromString $ guardname name
       ]
-      (BS.CApply
-         (BS.CVar $ BS.mkId BS.NoPos $ fromString name)
-         (map mktriggerarg args))
+      (BS.CApply nameexpr args')
   where
-    mktriggerarg (UExpr _ expr) = transExpr expr
+    ifcargid = BS.mkId BS.NoPos $ fromString ifcargname
+    nameid   = BS.mkId BS.NoPos $ fromString name
+    nameexpr = BS.CSelect (BS.CVar ifcargid) nameid
+
+    args'   = take (length args) (map argcall (argnames name))
+    argcall = BS.CVar . BS.mkId BS.NoPos . fromString
 
 -- | Writes the step rule, that updates all streams.
 mksteprule :: [Stream] -> BS.CRule
@@ -154,7 +157,9 @@ mksteprule streams =
       []
       Nothing
       [BS.CQFilter $ BS.CCon BS.idTrue []]
-      (BS.Cdo False $ bufferupdates ++ indexupdates)
+      -- NB: Use Caction instead of Cdo here. Caction permits an empty list of
+      -- statements, whereas Cdo does not.
+      (BS.Caction BS.NoPos $ bufferupdates ++ indexupdates)
   where
     (bufferupdates, indexupdates) = unzip $ map mkupdateglobals streams
 
@@ -188,168 +193,22 @@ mksteprule streams =
         genid   = BS.mkId BS.NoPos $ fromString $ generatorname sid
         indexid = BS.mkId BS.NoPos $ fromString $ indexname sid
 
-{-
--- | Writes the step function, that updates all streams.
-mkstep :: CSettings -> [Stream] -> [Trigger] -> [External] -> C.FunDef
-mkstep cSettings streams triggers exts =
-    C.FunDef void (cSettingsStepFunctionName cSettings) [] declns stmts
+-- | Write a struct declaration based on its definition.
+mkstructdecln :: Struct a => Type a -> BS.CDefn
+mkstructdecln (Struct x) =
+    BS.Cstruct
+      True
+      BS.SStruct
+      (BS.IdK structid)
+      [] -- No type variables
+      structfields
+      [] -- No derived instances
   where
+    structid = BS.mkId BS.NoPos $ fromString $ structname $ typename x
+    structfields = map mkstructfield $ toValues x
 
-    void = C.TypeSpec C.Void
-    stmts  =  map mkexcopy exts
-           ++ triggerStmts
-           ++ tmpassigns
-           ++ bufferupdates
-           ++ indexupdates
-    declns =  streamDeclns
-           ++ concat triggerDeclns
-    (streamDeclns, tmpassigns, bufferupdates, indexupdates) =
-      unzip4 $ map mkupdateglobals streams
-    (triggerDeclns, triggerStmts) =
-      unzip $ map mktriggercheck triggers
-
-    -- Write code to update global stream buffers and index.
-    mkupdateglobals :: Stream -> (C.Decln, C.Stmt, C.Stmt, C.Stmt)
-    mkupdateglobals (Stream sid buff expr ty) =
-      (tmpdecln, tmpassign, bufferupdate, indexupdate)
-        where
-          tmpdecln = C.VarDecln Nothing cty tmp_var Nothing
-
-          tmpassign = case ty of
-            Array _ -> C.Expr $ memcpy (C.Ident tmp_var) val size
-              where
-                size = C.LitInt (fromIntegral $ tysize ty)
-                        C..* C.SizeOfType (C.TypeName (tyElemName ty))
-            _       -> C.Expr $ C.Ident tmp_var C..= val
-
-          bufferupdate = case ty of
-            Array _ -> C.Expr $ memcpy dest (C.Ident tmp_var) size
-              where
-                dest = C.Index buff_var index_var
-                size = C.LitInt (fromIntegral $ tysize ty)
-                         C..* C.SizeOfType (C.TypeName (tyElemName ty))
-            _       -> C.Expr $
-                           C.Index buff_var index_var C..= (C.Ident tmp_var)
-
-          indexupdate = C.Expr $ index_var C..= (incindex C..% bufflength)
-            where
-              bufflength = C.LitInt $ fromIntegral $ length buff
-              incindex   = index_var C..+ C.LitInt 1
-
-          tmp_var   = streamname sid ++ "_tmp"
-          buff_var  = C.Ident $ streamname sid
-          index_var = C.Ident $ indexname sid
-          val       = C.Funcall (C.Ident $ generatorname sid) []
-          cty       = transtype ty
-
-    -- Make code that copies an external variable to its local one.
-    mkexcopy :: External -> C.Stmt
-    mkexcopy (External name cpyname ty) = C.Expr $ case ty of
-      Array _ -> memcpy exvar locvar size
-        where
-          exvar  = C.Ident cpyname
-          locvar = C.Ident name
-          size   = C.LitInt (fromIntegral $ tysize ty)
-                     C..* C.SizeOfType (C.TypeName (tyElemName ty))
-
-      _       -> C.Ident cpyname C..= C.Ident name
-
-    -- Make if-statement to check the guard, call the handler if necessary.
-    -- This returns two things:
-    --
-    -- * A list of Declns for temporary variables, one for each argument that
-    --   the handler function accepts. For example, if a handler function takes
-    --   three arguments, the list of Declns might look something like this:
-    --
-    --   @
-    --   int8_t   handler_arg_temp0;
-    --   int16_t  handler_arg_temp1;
-    --   struct s handler_arg_temp2;
-    --   @
-    --
-    -- * A Stmt representing the if-statement. Continuing the example above,
-    --   the if-statement would look something like this:
-    --
-    --   @
-    --   if (handler_guard()) {
-    --     handler_arg_temp0 = handler_arg0();
-    --     handler_arg_temp1 = handler_arg1();
-    --     handler_arg_temp2 = handler_arg2();
-    --     handler(handler_arg_temp0, handler_arg_temp1, &handler_arg_temp2);
-    --   }
-    --   @
-    --
-    -- We create temporary variables because:
-    --
-    -- 1. We want to pass structs by reference intead of by value. To this end,
-    --    we use C's & operator to obtain a reference to a temporary variable
-    --    of a struct type and pass that to the handler function.
-    --
-    -- 2. Assigning a struct to a temporary variable defensively ensures that
-    --    any modifications that the handler called makes to the struct argument
-    --    will not affect the internals of the monitoring code.
-    mktriggercheck :: Trigger -> ([C.Decln], C.Stmt)
-    mktriggercheck (Trigger name guard args) =
-        (aTmpDeclns, ifStmt)
-      where
-        aTmpDeclns = zipWith (\tmpVar arg ->
-                               C.VarDecln Nothing (tempType arg) tmpVar Nothing)
-                             aTempNames
-                             args
-          where
-            tempType (UExpr { uExprType = ty }) =
-              case ty of
-                -- If a temporary variable is being used to store an array,
-                -- declare the type of the temporary variable as a pointer, not
-                -- an array. The problem with declaring it as an array is that
-                -- the `arg` function will return a pointer, not an array, and
-                -- C doesn't make it easy to cast directly from an array to a
-                -- pointer.
-                Array ty' -> C.Ptr $ transtype ty'
-                _         -> transtype ty
-
-        aTempNames = take (length args) (argTempNames name)
-
-        ifStmt = C.If guard' firetrigger
-
-        guard' = C.Funcall (C.Ident $ guardname name) []
-
-        -- The body of the if-statement. This consists of statements that assign
-        -- the values of the temporary variables, following by a final statement
-        -- that passes the temporary variables to the handler function.
-        firetrigger = map C.Expr argAssigns ++
-                      [C.Expr $ C.Funcall (C.Ident name)
-                                          (zipWith passArg aTempNames args)]
-          where
-            passArg aTempName (UExpr { uExprType = ty }) =
-              case ty of
-                -- Special case for Struct to pass reference to temporary
-                -- struct variable to handler. (See the comments for
-                -- mktriggercheck for details.)
-                Struct _ -> C.UnaryOp C.Ref $ C.Ident aTempName
-                _        -> C.Ident aTempName
-
-            argAssigns = zipWith (\aTempName arg ->
-                                   C.AssignOp C.Assign (C.Ident aTempName) arg)
-                                 aTempNames
-                                 args'
-            args'        = take (length args) (map argcall (argnames name))
-            argcall name = C.Funcall (C.Ident name) []
-
-    -- Write a call to the memcpy function.
-    memcpy :: C.Expr -> C.Expr -> C.Expr -> C.Expr
-    memcpy dest src size = C.Funcall (C.Ident "memcpy") [dest, src, size]
-
-    -- Translate a Copilot type to a C99 type, handling arrays especially.
-    --
-    -- If the given type is an array (including multi-dimensional arrays), the
-    -- type is that of the elements in the array. Otherwise, it is just the
-    -- equivalent representation of the given type in C.
-    tyElemName :: Type a -> C.Type
-    tyElemName ty = case ty of
-      Array ty' -> tyElemName ty'
-      _         -> transtype ty
--}
+    mkstructfield :: Value a -> BS.CField
+    mkstructfield (Value ty field) = mkfield (fieldname field) (transtype ty)
 
 -- TODO RGS: The definitions below probably deserve another home
 

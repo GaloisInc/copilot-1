@@ -1,6 +1,7 @@
 {-# LANGUAGE GADTs      #-}
 {-# LANGUAGE Rank2Types #-}
 -- | Auxiliary functions that manipulate structures in Copilot.Core.
+-- TODO RGS: Remove this module
 module Copilot.Core.Extra where
 
 import Copilot.Core

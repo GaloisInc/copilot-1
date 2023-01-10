@@ -21,14 +21,13 @@ transExpr :: Expr a -> BS.CExpr
 transExpr (Const ty x) = constty ty x
 
 transExpr (Local ty1 _ name e1 e2) =
-  let e1'  = transExpr e1
-      cty1 = transtype ty1
-      e2'  = transExpr e2 in
+  let nameid = BS.mkId BS.NoPos $ fromString name
+      e1'    = transExpr e1
+      ty1'   = transtype ty1
+      e2'    = transExpr e2 in
   BS.Cletrec
-    [ BS.CLValue
-        (BS.mkId BS.NoPos $ fromString name)
-        [ BS.CClause [] [] e1'
-        ]
+    [ BS.CLValueSign
+        (BS.CDef nameid (BS.CQType [] ty1') [BS.CClause [] [] e1'])
         []
     ]
     e2'
@@ -41,7 +40,13 @@ transExpr (Drop _ amount sid) =
   BS.CApply (BS.CVar $ BS.mkId BS.NoPos $ fromString accessvar)
             [BS.CLit $ BS.CLiteral BS.NoPos index]
 
-transExpr (ExternVar _ name _) = BS.CVar $ BS.mkId BS.NoPos $ fromString name
+transExpr (ExternVar _ name _) =
+  let ifcargid = BS.mkId BS.NoPos $ fromString ifcargname in
+  BS.CSelect
+    (BS.CSelect
+      (BS.CVar ifcargid)
+      (BS.mkId BS.NoPos $ fromString name))
+    (BS.id_read BS.NoPos)
 
 transExpr (Label _ _ e) = transExpr e -- ignore label
 
@@ -183,7 +188,7 @@ constty ty =
     Struct s -> \v ->
       BS.CStruct
         (Just True)
-        (BS.mkId BS.NoPos $ fromString $ typename s)
+        (BS.mkId BS.NoPos $ fromString $ structname $ typename s)
         (map (\(Value ty'' field@(Field val)) ->
                ( BS.mkId BS.NoPos $ fromString $ fieldname field
                , constty ty'' val
@@ -228,7 +233,7 @@ transtype ty = case ty of
       length = fromIntegral $ tylength ty
   Struct s  -> BS.TCon $
     BS.TyCon
-      { BS.tcon_name = BS.mkId BS.NoPos $ fromString $ typename s
+      { BS.tcon_name = BS.mkId BS.NoPos $ fromString $ structname $ typename s
       , BS.tcon_kind = Just BS.KStar
       , BS.tcon_sort =
           BS.TIstruct BS.SStruct $

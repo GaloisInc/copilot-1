@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -190,14 +191,23 @@ constty ty =
              (toValues v))
 
 constvector :: Type a -> [a] -> BS.CExpr
-constvector ty vec =
+constvector ty = genvector (\_ -> constty ty)
+
+genvector :: (Int -> a -> BS.CExpr) -> [a] -> BS.CExpr
+genvector f vec =
+  snd $
   foldr
-    (\(x, i) v ->
-      BS.CApply
-        (BS.CVar (BS.mkId BS.NoPos "update"))
-        [v, cLit (BS.LInt (BS.ilDec i)), constty ty x])
-    (BS.CVar (BS.mkId BS.NoPos "newVector"))
-    (zip vec [0..])
+    (\x (!i, !v) ->
+      ( i+1
+      , BS.CApply
+          (BS.CVar (BS.mkId BS.NoPos "update"))
+          [ v
+          , cLit (BS.LInt (BS.ilDec (toInteger i)))
+          , f i x
+          ]
+      ))
+    (0, BS.CVar (BS.mkId BS.NoPos "newVector"))
+    vec
 
 -- | Translate a Copilot type to a Bluespec type.
 transtype :: Type a -> BS.CType

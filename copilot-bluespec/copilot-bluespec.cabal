@@ -1,7 +1,7 @@
 cabal-version: >= 1.10
 build-type:    Simple
 name:          copilot-bluespec
-version:       3.10
+version:       3.13
 maintainer:    Ivan Perez <ivan.perezdominguez@nasa.gov>
 author:        Ivan Perez
 license:       BSD3
@@ -48,7 +48,7 @@ library
     , mtl               >= 2.2   && < 2.4
     , pretty            >= 1.1.2 && < 1.2
 
-    , copilot-core      >= 3.12  && < 3.13
+    , copilot-core      >= 3.13  && < 3.14
     , language-bluespec >= 0.1   && < 0.2
 
   exposed-modules:

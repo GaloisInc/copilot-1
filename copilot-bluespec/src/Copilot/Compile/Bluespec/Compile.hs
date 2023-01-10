@@ -64,10 +64,6 @@ compileBS bluespecSettings prefix spec =
     [ifcDef, moduleDef]
     []
   where
-    -- TODO RGS: Hmmmmm
-    stringExpr :: String -> BS.CExpr
-    stringExpr = cLit . BS.LString
-
     imports :: [BS.CImport]
     imports =
       [ BS.CImpId False (BS.mkId BS.NoPos "Real")
@@ -78,17 +74,18 @@ compileBS bluespecSettings prefix spec =
     moduleDef = BS.CValueSign $
       BS.CDef
         (BS.mkId BS.NoPos $ fromString $ "mk" ++ prefix)
-        -- :: <prefix>Ifc -> Module Empty
+        -- :: Module <prefix>Ifc -> Module Empty
         (BS.CQType
           []
           (BS.tArrow
-            `BS.TAp` BS.TCon (BS.TyCon
-                       { BS.tcon_name = ifcid
-                       , BS.tcon_kind = Just BS.KStar
-                       , BS.tcon_sort = BS.TIstruct
-                                          (BS.SInterface [])
-                                          (map BS.cf_name ifcfields)
-                       })
+            `BS.TAp` (BS.tModule `BS.TAp`
+                      BS.TCon (BS.TyCon
+                                { BS.tcon_name = ifcid
+                                , BS.tcon_kind = Just BS.KStar
+                                , BS.tcon_sort = BS.TIstruct
+                                                   (BS.SInterface [])
+                                                   (map BS.cf_name ifcfields)
+                                }))
             `BS.TAp` (BS.tModule `BS.TAp`
                       BS.TCon (BS.TyCon
                                 { BS.tcon_name = BS.idEmpty
@@ -102,6 +99,7 @@ compileBS bluespecSettings prefix spec =
             , BS.CSletrec $ map bindifcfield ifcfields
             , BS.CSExpr Nothing $
               BS.Cmodule BS.NoPos $
+               map BS.CMStmt (mkglobals streams) ++
                [ BS.CMStmt $ BS.CSletrec $ genfuns streams triggers
                ] ++
                [ BS.CMrules $
@@ -114,34 +112,7 @@ compileBS bluespecSettings prefix spec =
     ifcmodid = BS.mkId BS.NoPos "ifcMod"
 
     rules :: [BS.CRule]
-    rules = map (rule streams) triggers
-
-    rule :: [Stream] -> Trigger -> BS.CRule
-    rule streams trigger =
-        BS.CRule
-          []
-          (Just (stringExpr ruleName))
-          [ BS.CQFilter $
-            BS.CVar $ BS.mkId BS.NoPos $
-            fromString $ guardname name
-          ]
-          (BS.Cdo
-            False
-            [ BS.CSExpr Nothing $
-              BS.CApply
-                (BS.CVar BS.idDisplay)
-                [stringExpr ("Violation: " ++ name)]
-            ])
-      where
-        ruleName = "Monitor" ++ name
-        (Trigger name guard args) = trigger
-
-    -- One register definition per extern
-    -- TODO RGS: Registers should be passed in an interface.
-    {-
-    registers = map regDecl exts
-    regDecl _ = ""
-    -}
+    rules = map mktriggerrule triggers ++ [mksteprule streams]
 
     streams  = specStreams spec
     triggers = specTriggers spec
@@ -161,21 +132,28 @@ compileBS bluespecSettings prefix spec =
 
     bindifcfield :: BS.CField -> BS.CDefl
     bindifcfield (BS.CField { BS.cf_name = name }) =
-      BS.CLValue name [BS.CClause [] [] (BS.CSelect (BS.CVar ifcmodid) name)] []
+      BS.CLValue name [BS.CClause [] [] (BS.CSelect (BS.CVar ifcargid) name)] []
+
+    -- Make buffer and index declarations for streams.
+    mkglobals :: [Stream] -> [BS.CStmt]
+    mkglobals streams = concatMap buffdecln streams ++ map indexdecln streams
+      where
+        buffdecln  (Stream sid buff _ ty) = mkbuffdecln  sid ty buff
+        indexdecln (Stream sid _    _ _ ) = mkindexdecln sid
 
     -- Make generator functions, including trigger arguments.
     genfuns :: [Stream] -> [Trigger] -> [BS.CDefl]
-    genfuns streams triggers =  concatMap accessdecln streams
-                             ++ concatMap streamgen streams
-                             ++ concatMap triggergen triggers
+    genfuns streams triggers =  map accessdecln streams
+                             ++ map streamgen streams
+                             ++ map triggergen triggers
       where
 
-        accessdecln :: Stream -> [BS.CDefl]
+        accessdecln :: Stream -> BS.CDefl
         accessdecln (Stream sid buff _ ty) = mkaccessdecln sid ty buff
 
-        streamgen :: Stream -> [BS.CDefl]
+        streamgen :: Stream -> BS.CDefl
         streamgen (Stream sid _ expr ty) = genfun (generatorname sid) expr ty
 
-        triggergen :: Trigger -> [BS.CDefl]
+        triggergen :: Trigger -> BS.CDefl
         triggergen (Trigger name guard _) =
           genfun (guardname name) guard Bool

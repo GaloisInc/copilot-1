@@ -21,32 +21,42 @@ import Copilot.Compile.Bluespec.Translate
 import Copilot.Compile.Bluespec.Util
 
 -- | Write a generator function for a stream.
-genfun :: String -> Expr a -> Type a -> [BS.CDefl]
+genfun :: String -> Expr a -> Type a -> BS.CDefl
 genfun name expr ty =
     -- name :: ty
     -- name = expr
-    [ BS.CLValueSign (BS.CDef nameid (BS.CQType [] (transtype ty)) []) []
-    , BS.CLValue nameid [BS.CClause [] [] (transExpr expr)] []
-    ]
+    BS.CLValueSign
+      (BS.CDef nameid (BS.CQType [] (transtype ty)) [def])
+      []
   where
     nameid = BS.mkId BS.NoPos $ fromString name
+    def = BS.CClause [] [] (transExpr expr)
 
 -- | Bind a buffer variable and initialise it with the stream buffer.
 mkbuffdecln :: forall a. Id -> Type a -> [a] -> [BS.CStmt]
 mkbuffdecln sid ty xs =
-    initvals ++ [BS.CSletrec [initbufsig, initbufdef]]
+    initvals ++ [BS.CSletrec [initbufsig]]
   where
     -- sid_0     :: Reg <ty> <- mkReg xs_0
     -- ...
     -- sid_(n-1) :: Reg <ty> <- mkReg xs_(n-1)
     initvals = zipWith mkinitval xs [0..]
     -- sid :: Vector n (Reg <ty>)
-    initbufsig = BS.CLValueSign (BS.CDef nameid (BS.CQType [] bsty) []) []
     -- sid = update (... (update newVector 0 xs_0) ...) (n-1) xs_(n-1)
-    initbufdef = BS.CLValue nameid [BS.CClause [] [] (constvector ty xs)] []
+    initbufsig = BS.CLValueSign
+                   (BS.CDef nameid (BS.CQType [] vecty) [initbufdef])
+                   []
+    initbufdef = BS.CClause
+                   []
+                   []
+                   (genvector
+                     (\idx _ -> BS.CVar $ BS.mkId BS.NoPos $
+                                fromString $ streamelemname sid idx)
+                     xs)
 
     nameid   = BS.mkId BS.NoPos $ fromString $ streamname sid
-    bsty     = tVector `BS.TAp` BS.cTNum numelems BS.NoPos `BS.TAp` transtype ty
+    bsty     = tReg `BS.TAp` transtype ty
+    vecty    = tVector `BS.TAp` BS.cTNum numelems BS.NoPos `BS.TAp` bsty
     numelems = toInteger $ length xs
 
     mkinitval :: a -> Int -> BS.CStmt
@@ -55,7 +65,7 @@ mkbuffdecln sid ty xs =
           (BS.CPVar elemid)
           Nothing
           []
-          (BS.CQType [] (tReg `BS.TAp` bsty))
+          (BS.CQType [] bsty)
           (BS.CApply (BS.CVar (BS.mkId BS.NoPos "mkReg")) [constty ty x])
       where
         elemname = streamelemname sid elemnum
@@ -77,14 +87,13 @@ mkindexdecln sid =
     bsty   = tReg `BS.TAp` BS.tBitN 64 BS.NoPos
 
 -- | Define an accessor function for the ring buffer associated with a stream
-mkaccessdecln :: Id -> Type a -> [a] -> [BS.CDefl]
+mkaccessdecln :: Id -> Type a -> [a] -> BS.CDefl
 mkaccessdecln sid ty xs =
     -- sid_get :: Bits 64 -> ty
     -- sid_get x = (select sid ((sid_idx + x) % bufflength))._read
-    [ BS.CLValueSign (BS.CDef nameid (BS.CQType [] funty) []) []
-    , BS.CLValue nameid [BS.CClause [BS.CPVar argid] [] expr] []
-    ]
+    BS.CLValueSign (BS.CDef nameid (BS.CQType [] funty) [def]) []
   where
+    def        = BS.CClause [BS.CPVar argid] [] expr
     argty      = BS.tBit `BS.TAp` BS.cTNum 64 BS.NoPos
     retty      = transtype ty
     funty      = BS.tArrow `BS.TAp` argty `BS.TAp` retty
@@ -111,8 +120,11 @@ mkspecifcfields triggers exts =
     -- trigger :: args_1 -> ... -> args_n -> Action
     mktriggerfield :: Trigger -> BS.CField
     mktriggerfield (Trigger name _ args) =
-      mkfield name $ foldr (\(UExpr arg _) res -> BS.TAp (transtype arg) res)
-                           BS.tAction args
+      mkfield name $
+      foldr
+        (\(UExpr arg _) res -> BS.tArrow `BS.TAp` transtype arg `BS.TAp` res)
+        BS.tAction
+        args
 
     -- ext :: Reg ty
     mkextfield :: External -> BS.CField
@@ -140,9 +152,7 @@ mksteprule :: [Stream] -> BS.CRule
 mksteprule streams =
     BS.CRule
       []
-      -- TODO RGS: We should probably make sure that there is no other rule
-      -- named `step`
-      (Just $ cLit $ BS.LString "step")
+      Nothing
       [BS.CQFilter $ BS.CCon BS.idTrue []]
       (BS.Cdo False $ bufferupdates ++ indexupdates)
   where
@@ -153,8 +163,30 @@ mksteprule streams =
     mkupdateglobals (Stream sid buff expr ty) =
         (bufferupdate, indexupdate)
       where
-        bufferupdate = undefined
-        indexupdate = undefined
+        bufferupdate =
+          BS.CSExpr Nothing $
+          BS.Cwrite
+            BS.NoPos
+            (cSelect (BS.CVar buffid) (BS.CVar indexid))
+            (BS.CVar genid)
+
+        indexupdate =
+          BS.CSExpr Nothing $
+          BS.Cwrite
+            BS.NoPos
+            (BS.CVar indexid)
+            (BS.CApply (BS.CVar (BS.idPercentAt BS.NoPos))
+                       [incindex, bufflength])
+
+        bufflength = cLit $ BS.LInt $ BS.ilDec $ toInteger $ length buff
+        incindex   = BS.CApply (BS.CVar BS.idPlus)
+                       [ BS.CVar indexid
+                       , cLit $ BS.LInt $ BS.ilDec 1
+                       ]
+
+        buffid  = BS.mkId BS.NoPos $ fromString $ streamname sid
+        genid   = BS.mkId BS.NoPos $ fromString $ generatorname sid
+        indexid = BS.mkId BS.NoPos $ fromString $ indexname sid
 
 {-
 -- | Writes the step function, that updates all streams.

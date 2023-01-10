@@ -1,6 +1,8 @@
 -- | Auxiliary helper functions to generate Bluespec code.
 module Copilot.Compile.Bluespec.Util where
 
+import Data.Char (toUpper)
+
 import Copilot.Core (Id)
 
 -- | Turn a stream id into a suitable Bluespec variable name.
@@ -40,6 +42,23 @@ argTempName name n = name ++ "_arg_temp" ++ show n
 argnames :: String -> [String]
 argnames base = map (argname base) [0..]
 
--- | Turn a specification name into the name of its module interface
+-- | Turn a specification name into the name of its module interface.
 specinterfacename :: String -> String
 specinterfacename prefix = prefix ++ "Ifc"
+
+-- | Turn a specification name into the name of the module that declares its
+-- struct types.
+spectypesname :: String -> String
+spectypesname prefix = prefix ++ "Types"
+
+-- | The name of the variable of type @<prefix>Ifc@. This is used to select
+-- trigger functions and external variables.
+ifcargname :: String
+ifcargname = "ifc"
+
+-- | Turn a Copilot struct name into the name of a Bluespec struct.
+--
+-- TODO RGS: This smells a bit funny. Ask Ivan about this...
+structname :: String -> String
+structname []     = []
+structname (c:cs) = toUpper c:cs

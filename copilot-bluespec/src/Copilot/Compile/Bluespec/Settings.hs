@@ -2,11 +2,10 @@
 module Copilot.Compile.Bluespec.Settings where
 
 -- | Settings used to customize the code generated.
-data BluespecSettings = BluespecSettings
-  { bluespecSettingsStepFunctionName :: String
-  , bluespecSettingsOutputDirectory  :: FilePath
+newtype BluespecSettings = BluespecSettings
+  { bluespecSettingsOutputDirectory  :: FilePath
   }
 
--- | Default settings with a step function called @step@.
+-- | Default Bluespec settings. Output to the current directory.
 mkDefaultBluespecSettings :: BluespecSettings
-mkDefaultBluespecSettings = BluespecSettings "step" "."
+mkDefaultBluespecSettings = BluespecSettings "."

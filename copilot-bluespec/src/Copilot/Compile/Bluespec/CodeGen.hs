@@ -202,7 +202,8 @@ mkstructdecln (Struct x) =
       (BS.IdK structid)
       [] -- No type variables
       structfields
-      [] -- No derived instances
+      -- Derive a Bits instance so that we can put this struct in a Reg
+      [BS.CTypeclass BS.idBits]
   where
     structid = BS.mkId BS.NoPos $ fromString $ structname $ typename x
     structfields = map mkstructfield $ toValues x

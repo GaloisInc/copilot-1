@@ -71,9 +71,6 @@ transOp1 op e =
     Recip    ty -> BS.CApply
                      (BS.CVar (BS.idSlashAt BS.NoPos))
                      [constNumTy ty 1, e]
-    Exp     _ty -> app $ BS.mkId BS.NoPos "exp_e"
-    Log     _ty -> app $ BS.mkId BS.NoPos "log"
-
     BwNot   _ty -> app $ BS.idInvertAt BS.NoPos
     Sqrt    _ty -> BS.CSelect
                      (BS.CApply
@@ -86,6 +83,8 @@ transOp1 op e =
                                 fromString $ accessorname f
 
     -- Unsupported operations
+    Exp     _ty -> unsupportedFPOp "exp"
+    Log     _ty -> unsupportedFPOp "log"
     Acos    _ty -> unsupportedFPOp "acos"
     Asin    _ty -> unsupportedFPOp "asin"
     Atan    _ty -> unsupportedFPOp "atan"
@@ -98,6 +97,9 @@ transOp1 op e =
     Cosh    _ty -> unsupportedFPOp "cosh"
     Sinh    _ty -> unsupportedFPOp "sinh"
     Tanh    _ty -> unsupportedFPOp "tanh"
+
+    -- TODO RGS: These should be doable, but I need to understand the type
+    -- signature of FloatingPoint.round first
     Ceiling _ty -> unsupportedFPOp "ceiling"
     Floor   _ty -> unsupportedFPOp "floor"
   where
@@ -116,8 +118,6 @@ transOp2 op e1 e2 =
     Mod      _ty -> app $ BS.idPercentAt BS.NoPos
     Div      _ty -> app $ BS.idSlashAt BS.NoPos
     Fdiv     _ty -> app $ BS.idSlashAt BS.NoPos
-    Pow      _ty -> app $ BS.idStarStarAt BS.NoPos
-    Logb     _ty -> app $ BS.mkId BS.NoPos "logb"
     Eq       _   -> app BS.idEqual
     Ne       _   -> app BS.idNotEqual
     Le       _   -> app $ BS.idLtEqAt BS.NoPos
@@ -132,6 +132,8 @@ transOp2 op e1 e2 =
     Index    _   -> cSelect e1 e2
 
     -- Unsupported operation
+    Pow      _ty -> unsupportedFPOp "(**)"
+    Logb     _ty -> unsupportedFPOp "logb"
     Atan2    _ty -> unsupportedFPOp "atan2"
   where
     app i = BS.CApply (BS.CVar i) [e1, e2]

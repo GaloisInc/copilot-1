@@ -255,3 +255,7 @@ are three actions in the `Fibs.hs` example:
 
 TODO RGS: We have to do some name mangling here to give struct names capital
 letters. Is there a better way?
+
+## Floating-point numbers
+
+TODO RGS: Hoo boy

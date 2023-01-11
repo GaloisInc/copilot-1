@@ -152,7 +152,7 @@ transCast :: Type a -> BS.CExpr -> BS.CExpr
 transCast = error "TODO RGS: transCast"
 
 -- | Transform a Copilot Core literal, based on its value and type, into a
--- Bluespec literal.
+-- Bluespec expression.
 constty :: Type a -> a -> BS.CExpr
 constty ty =
   case ty of
@@ -160,16 +160,16 @@ constty ty =
     -- Bool is an enum, so we must construct it using a CCon rather than with
     -- a CLit.
     Bool      -> \v -> BS.CCon (if v then BS.idTrue else BS.idFalse) []
-    Int8      -> cLit . BS.LInt . BS.ilDec . toInteger
-    Int16     -> cLit . BS.LInt . BS.ilDec . toInteger
-    Int32     -> cLit . BS.LInt . BS.ilDec . toInteger
-    Int64     -> cLit . BS.LInt . BS.ilDec . toInteger
-    Word8     -> cLit . BS.LInt . BS.ilDec . toInteger
-    Word16    -> cLit . BS.LInt . BS.ilDec . toInteger
-    Word32    -> cLit . BS.LInt . BS.ilDec . toInteger
-    Word64    -> cLit . BS.LInt . BS.ilDec . toInteger
-    Float     -> cLit . BS.LReal . realToFrac
-    Double    -> cLit . BS.LReal
+    Int8      -> constInt . toInteger
+    Int16     -> constInt . toInteger
+    Int32     -> constInt . toInteger
+    Int64     -> constInt . toInteger
+    Word8     -> constInt . toInteger
+    Word16    -> constInt . toInteger
+    Word32    -> constInt . toInteger
+    Word64    -> constInt . toInteger
+    Float     -> constFP . realToFrac
+    Double    -> constFP
 
     -- Translating a Copilot array literal to a Bluespec Vector is somewhat
     -- involved. Given a Copilot array {x_0, ..., x_(n-1)}, the
@@ -244,16 +244,38 @@ transtype ty = case ty of
               (toValues s)
       }
 
--- Translate a literal number of type @ty@ into a Bluespec literal.
+-- Translate a literal number of type @ty@ into a Bluespec expression.
 --
 -- PRE: The type of PRE is numeric (integer or floating-point), that
 -- is, not boolean, struct or array.
 constNumTy :: Type a -> Integer -> BS.CExpr
 constNumTy ty =
   case ty of
-    Float  -> cLit . BS.LReal . fromInteger
-    Double -> cLit . BS.LReal . fromInteger
-    _      -> cLit . BS.LInt . BS.ilDec
+    Float  -> constFP . fromInteger
+    Double -> constFP . fromInteger
+    _      -> constInt
+
+-- Translate a Copilot integer literal into a Bluespec expression.
+constInt :: Integer -> BS.CExpr
+constInt i
+  -- Bluespec intentionally does not support negative literal syntax (e.g.,
+  -- -42), so we must create negative integer literals using the `negate`
+  -- function.
+  | i >= 0    = cLit $ BS.LInt $ BS.ilDec i
+  | otherwise = BS.CApply
+                  (BS.CVar $ BS.idNegateAt BS.NoPos)
+                  [cLit $ BS.LInt $ BS.ilDec $ negate i]
+
+-- Translate a Copilot floating-point literal into a Bluespec expression.
+constFP :: Double -> BS.CExpr
+constFP d
+  -- Bluespec intentionally does not support negative literal syntax (e.g.,
+  -- -42.5), so we must create negative floating-point literals using the
+  -- `negate` function.
+  | d >= 0    = cLit $ BS.LReal d
+  | otherwise = BS.CApply
+                  (BS.CVar $ BS.idNegateAt BS.NoPos)
+                  [cLit $ BS.LReal $ negate d]
 
 -- TODO RGS: The definitions below probably deserve another home
 

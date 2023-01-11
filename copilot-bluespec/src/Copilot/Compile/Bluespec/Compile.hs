@@ -254,6 +254,6 @@ compileTypesBS _bsSettings prefix spec =
 -- | Imports from the Bluespec standard library.
 stdLibImports :: [BS.CImport]
 stdLibImports =
-  [ BS.CImpId False $ BS.mkId BS.NoPos "Real"
+  [ BS.CImpId False $ BS.mkId BS.NoPos "FloatingPoint"
   , BS.CImpId False $ BS.mkId BS.NoPos "Vector"
   ]

@@ -259,3 +259,5 @@ letters. Is there a better way?
 ## Floating-point numbers
 
 TODO RGS: Hoo boy
+
+See also https://github.com/B-Lang-org/bsc/issues/368

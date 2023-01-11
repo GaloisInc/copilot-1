@@ -75,6 +75,11 @@ transOp1 op e =
     Log     _ty -> app $ BS.mkId BS.NoPos "log"
 
     BwNot   _ty -> app $ BS.idInvertAt BS.NoPos
+    Sqrt    _ty -> BS.CSelect
+                     (BS.CApply
+                       (BS.CVar (BS.mkId BS.NoPos "sqrtFP"))
+                       [e, defaultRoundMode])
+                     BS.idPrimFst
 
     Cast fromTy toTy -> transCast fromTy toTy e
     GetField (Struct _)  _ f -> BS.CSelect e $ BS.mkId BS.NoPos $
@@ -93,7 +98,6 @@ transOp1 op e =
     Cosh    _ty -> unsupportedFPOp "cosh"
     Sinh    _ty -> unsupportedFPOp "sinh"
     Tanh    _ty -> unsupportedFPOp "tanh"
-    Sqrt    _ty -> unsupportedFPOp "sqrt"
     Ceiling _ty -> unsupportedFPOp "ceiling"
     Floor   _ty -> unsupportedFPOp "floor"
   where
@@ -309,7 +313,7 @@ transCast fromTy toTy =
           (BS.CVar (BS.mkId BS.NoPos "vFixedToFloat"))
           [ e
           , constNumTy Word64 0
-          , BS.CCon (BS.mkId BS.NoPos "Rnd_Nearest_Even") []
+          , defaultRoundMode
           ])
         BS.idPrimFst
 
@@ -512,3 +516,6 @@ unsupportedFPOp :: String -> a
 unsupportedFPOp op =
   error $ "Bluespec's FloatingPoint type does not support the " ++ op ++
           " operation."
+
+defaultRoundMode :: BS.CExpr
+defaultRoundMode = BS.CCon (BS.mkId BS.NoPos "Rnd_Nearest_Even") []

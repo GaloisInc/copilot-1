@@ -127,7 +127,7 @@ transOp2 op e1 e2 =
     BwXor    _   -> app $ BS.idCaretAt BS.NoPos
     BwShiftL _ _ -> app $ BS.idLshAt BS.NoPos
     BwShiftR _ _ -> app $ BS.idRshAt BS.NoPos
-    Index    _   -> cSelect e1 e2
+    Index    _   -> cIndexVector e1 e2
 
     -- Unsupported operations (see
     -- https://github.com/B-Lang-org/bsc/discussions/534)
@@ -479,13 +479,11 @@ constFP ty d
     withTypeAnnotation :: BS.CExpr -> BS.CExpr
     withTypeAnnotation e = e `BS.CHasType` BS.CQType [] (transType ty)
 
--- TODO RGS: The definitions below probably deserve another home
-
 cLit :: BS.Literal -> BS.CExpr
 cLit = BS.CLit . BS.CLiteral BS.NoPos
 
-cSelect :: BS.CExpr -> BS.CExpr -> BS.CExpr
-cSelect vec idx =
+cIndexVector :: BS.CExpr -> BS.CExpr -> BS.CExpr
+cIndexVector vec idx =
   BS.CApply (BS.CVar (BS.mkId BS.NoPos "select")) [vec, idx]
 
 tVector :: BS.CType

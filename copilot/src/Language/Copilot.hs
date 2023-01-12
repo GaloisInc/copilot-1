@@ -9,7 +9,7 @@
 -- together with one of the backend modules (at present, only
 -- 'Copilot.Compile.C99' from the
 -- <https://hackage.haskell.org/package/copilot-c99 copilot-c99> library is
--- available).
+-- available). (TODO RGS: Also mention Bluespec)
 module Language.Copilot
   (
     module Copilot.Language

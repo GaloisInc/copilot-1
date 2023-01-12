@@ -3,7 +3,7 @@
 # Copilot: a stream DSL
 Copilot-bluespec implements a Bluespec backend for Copilot.
 
-This is at present preliminary code.
+This is at present preliminary code (TODO RGS: Remove this at some point).
 
 ## Installation
 Copilot-bluespec can be found on

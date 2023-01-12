@@ -5,16 +5,15 @@
 -- | Translate Copilot Core expressions and operators to Bluespec.
 module Copilot.Compile.Bluespec.Translate where
 
-import Control.Monad.State
 import Data.String (IsString (..))
-
-import qualified Language.Bluespec.Classic.AST as BS
-import qualified Language.Bluespec.Classic.AST.Builtin.Ids as BS
-import qualified Language.Bluespec.Classic.AST.Builtin.Types as BS
 
 import Copilot.Core
 import Copilot.Compile.Bluespec.Error (impossible)
 import Copilot.Compile.Bluespec.Util
+
+import qualified Language.Bluespec.Classic.AST as BS
+import qualified Language.Bluespec.Classic.AST.Builtin.Ids as BS
+import qualified Language.Bluespec.Classic.AST.Builtin.Types as BS
 
 -- | Translates a Copilot Core expression into a Bluespec expression.
 transExpr :: Expr a -> BS.CExpr
@@ -23,7 +22,7 @@ transExpr (Const ty x) = constty ty x
 transExpr (Local ty1 _ name e1 e2) =
   let nameid = BS.mkId BS.NoPos $ fromString name
       e1'    = transExpr e1
-      ty1'   = transtype ty1
+      ty1'   = transType ty1
       e2'    = transExpr e2 in
   BS.Cletrec
     [ BS.CLValueSign
@@ -81,6 +80,7 @@ transOp1 op e =
     Cast fromTy toTy -> transCast fromTy toTy e
     GetField (Struct _)  _ f -> BS.CSelect e $ BS.mkId BS.NoPos $
                                 fromString $ accessorname f
+    GetField _ _ _ -> impossible "transOp1" "copilot-bluespec"
 
     -- Unsupported operations (see
     -- https://github.com/B-Lang-org/bsc/discussions/534)
@@ -247,7 +247,7 @@ transCast fromTy toTy =
     (Int16, Word16)  -> unpackPack
     (Int8,  Word8)   -> unpackPack
 
-    _ -> impossible "transCast" "Copilot.Compile.Bluespec.Translate"
+    _ -> impossible "transCast" "copilot-bluespec"
   where
     -- unpackPack :: (Bits fromTy n, Bits toTy n) => fromTy -> toTy
     -- unpackPack e = (unpack (pack e)) :: toTy
@@ -295,7 +295,7 @@ transCast fromTy toTy =
     -- upcast to for type disambiguation purposes.
     unpackPackUpcast :: Type a -> BS.CExpr -> BS.CExpr
     unpackPackUpcast upcastTy e = unpackPack $
-      BS.CApply extendExpr [e] `BS.CHasType` BS.CQType [] (transtype upcastTy)
+      BS.CApply extendExpr [e] `BS.CHasType` BS.CQType [] (transType upcastTy)
 
     -- castIntegralToFloatingPoint :: (FixedFloatCVT fromTy toTy) => fromTy toTy
     -- castIntegralToFloatingPoint e =
@@ -321,7 +321,7 @@ transCast fromTy toTy =
     -- It is sometimes possible to have ambiguous types unless we give explicit
     -- type signatures to various expressions.
     withTypeAnnotation :: BS.CExpr -> BS.CExpr
-    withTypeAnnotation e = e `BS.CHasType` BS.CQType [] (transtype toTy)
+    withTypeAnnotation e = e `BS.CHasType` BS.CQType [] (transType toTy)
 
     extendExpr   = BS.CVar $ BS.mkId BS.NoPos "extend"
     truncateExpr = BS.CVar $ BS.mkId BS.NoPos "truncate"
@@ -355,7 +355,7 @@ constty ty =
     -- We use the `update` function instead of the := syntax (e.g.,
     -- { array_temp[0] := x; array_temp[1] := y; ...}) so that we can construct
     -- a Vector in a pure context.
-    Array ty' -> constvector ty' . arrayelems
+    Array ty' -> constVector ty' . arrayelems
 
     -- Converting a Copilot struct { field_0 = x_0, ..., field_(n-1) = x_(n-1) }
     -- to a Bluespec struct is quite straightforward, given Bluespec's struct
@@ -370,11 +370,11 @@ constty ty =
                ))
              (toValues v))
 
-constvector :: Type a -> [a] -> BS.CExpr
-constvector ty = genvector (\_ -> constty ty)
+constVector :: Type a -> [a] -> BS.CExpr
+constVector ty = genVector (\_ -> constty ty)
 
-genvector :: (Int -> a -> BS.CExpr) -> [a] -> BS.CExpr
-genvector f vec =
+genVector :: (Int -> a -> BS.CExpr) -> [a] -> BS.CExpr
+genVector f vec =
   snd $
   foldr
     (\x (!i, !v) ->
@@ -390,8 +390,8 @@ genvector f vec =
     vec
 
 -- | Translate a Copilot type to a Bluespec type.
-transtype :: Type a -> BS.CType
-transtype ty = case ty of
+transType :: Type a -> BS.CType
+transType ty = case ty of
   Bool   -> BS.tBool
   Int8   -> BS.tInt  `BS.TAp` BS.cTNum  8 BS.NoPos
   Int16  -> BS.tInt  `BS.TAp` BS.cTNum 16 BS.NoPos
@@ -418,9 +418,9 @@ transtype ty = case ty of
                                      BS.cTNum 11 BS.NoPos `BS.TAp`
                                      BS.cTNum 52 BS.NoPos
       }
-  Array ty' -> tVector `BS.TAp` BS.cTNum length BS.NoPos `BS.TAp` transtype ty'
+  Array ty' -> tVector `BS.TAp` BS.cTNum len BS.NoPos `BS.TAp` transType ty'
     where
-      length = fromIntegral $ tylength ty
+      len = toInteger $ tylength ty
   Struct s -> BS.TCon $
     BS.TyCon
       { BS.tcon_name = BS.mkId BS.NoPos $ fromString $ structname $ typename s
@@ -460,7 +460,7 @@ constInt ty i
     -- It is sometimes possible to have ambiguous types unless we give explicit
     -- type signatures to various expressions.
     withTypeAnnotation :: BS.CExpr -> BS.CExpr
-    withTypeAnnotation e = e `BS.CHasType` BS.CQType [] (transtype ty)
+    withTypeAnnotation e = e `BS.CHasType` BS.CQType [] (transType ty)
 
 -- Translate a Copilot floating-point literal into a Bluespec expression.
 constFP :: Type ty -> Double -> BS.CExpr
@@ -477,7 +477,7 @@ constFP ty d
     -- It is sometimes possible to have ambiguous types unless we give explicit
     -- type signatures to various expressions.
     withTypeAnnotation :: BS.CExpr -> BS.CExpr
-    withTypeAnnotation e = e `BS.CHasType` BS.CQType [] (transtype ty)
+    withTypeAnnotation e = e `BS.CHasType` BS.CQType [] (transType ty)
 
 -- TODO RGS: The definitions below probably deserve another home
 

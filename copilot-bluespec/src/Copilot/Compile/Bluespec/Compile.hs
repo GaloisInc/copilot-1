@@ -15,17 +15,15 @@ import System.Exit                    (exitFailure)
 import System.FilePath                ((</>))
 import System.IO                      (hPutStrLn, stderr)
 
-import qualified Language.Bluespec.Classic.AST as BS
-import qualified Language.Bluespec.Classic.AST.Builtin.Ids as BS
-import qualified Language.Bluespec.Classic.AST.Builtin.Types as BS
-
 import Copilot.Core
-import Copilot.Core.Extra
 import Copilot.Compile.Bluespec.CodeGen
 import Copilot.Compile.Bluespec.External
 import Copilot.Compile.Bluespec.Settings
-import Copilot.Compile.Bluespec.Translate
 import Copilot.Compile.Bluespec.Util
+
+import qualified Language.Bluespec.Classic.AST as BS
+import qualified Language.Bluespec.Classic.AST.Builtin.Ids as BS
+import qualified Language.Bluespec.Classic.AST.Builtin.Types as BS
 
 -- | Compile a specification to a Bluespec file.
 --
@@ -131,8 +129,8 @@ compileBS _bsSettings prefix spec =
             [ BS.CSBind (BS.CPVar ifcargid) Nothing [] (BS.CVar ifcmodid)
             , BS.CSExpr Nothing $
               BS.Cmodule BS.NoPos $
-               map BS.CMStmt (mkglobals streams) ++
-               [ BS.CMStmt $ BS.CSletrec $ genfuns streams triggers
+               map BS.CMStmt mkglobals ++
+               [ BS.CMStmt $ BS.CSletrec genfuns
                ] ++
                [ BS.CMrules $
                  BS.Crules [] rules
@@ -154,17 +152,17 @@ compileBS _bsSettings prefix spec =
     ifcfields = mkspecifcfields triggers exts
 
     -- Make buffer and index declarations for streams.
-    mkglobals :: [Stream] -> [BS.CStmt]
-    mkglobals streams = concatMap buffdecln streams ++ map indexdecln streams
+    mkglobals :: [BS.CStmt]
+    mkglobals = concatMap buffdecln streams ++ map indexdecln streams
       where
         buffdecln  (Stream sid buff _ ty) = mkbuffdecln  sid ty buff
         indexdecln (Stream sid _    _ _ ) = mkindexdecln sid
 
     -- Make generator functions, including trigger arguments.
-    genfuns :: [Stream] -> [Trigger] -> [BS.CDefl]
-    genfuns streams triggers =  map accessdecln streams
-                             ++ map streamgen streams
-                             ++ concatMap triggergen triggers
+    genfuns :: [BS.CDefl]
+    genfuns =  map accessdecln streams
+            ++ map streamgen streams
+            ++ concatMap triggergen triggers
       where
 
         accessdecln :: Stream -> BS.CDefl
@@ -180,7 +178,7 @@ compileBS _bsSettings prefix spec =
             argdefs  = map arggen (zip (argnames name) args)
 
             arggen :: (String, UExpr) -> BS.CDefl
-            arggen (argname, UExpr ty expr) = genfun argname expr ty
+            arggen (argName, UExpr ty expr) = genfun argName expr ty
 
 -- | Generate a @<prefix>Ifc.bs@ file from a 'Spec'. This contains the
 -- definition of the @<prefix>Ifc@ interface, which declares the types of all
@@ -248,7 +246,7 @@ compileTypesBS _bsSettings prefix spec =
         uTypes = nub $ concatMap (\(UExpr _ e) -> exprtypes e) es
 
         mkTypeDecln (UType ty) = case ty of
-          Struct _ -> Just $ mkstructdecln ty
+          Struct x -> Just $ mkstructdecln x
           _        -> Nothing
 
 -- | Imports from the Bluespec standard library.

@@ -1,6 +1,6 @@
 {-# LANGUAGE ExistentialQuantification #-}
--- | Represent information about externs needed in the generation of Bluespec code
--- for stream declarations and triggers.
+-- | Represent information about externs needed in the generation of Bluespec
+-- code for stream declarations and triggers.
 module Copilot.Compile.Bluespec.External where
 
 import Data.List (unionBy)

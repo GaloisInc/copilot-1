@@ -110,20 +110,8 @@ compileBS _bsSettings prefix spec =
         (BS.CQType
           []
           (BS.tArrow
-            `BS.TAp` (BS.tModule `BS.TAp`
-                      BS.TCon (BS.TyCon
-                                { BS.tcon_name = ifcid
-                                , BS.tcon_kind = Just BS.KStar
-                                , BS.tcon_sort = BS.TIstruct
-                                                   (BS.SInterface [])
-                                                   (map BS.cf_name ifcfields)
-                                }))
-            `BS.TAp` (BS.tModule `BS.TAp`
-                      BS.TCon (BS.TyCon
-                                { BS.tcon_name = BS.idEmpty
-                                , BS.tcon_kind = Just BS.KStar
-                                , BS.tcon_sort = BS.TIstruct (BS.SInterface []) []
-                                }))))
+            `BS.TAp` (BS.tModule `BS.TAp` ifcty)
+            `BS.TAp` (BS.tModule `BS.TAp` emptyty)))
         [ BS.CClause [BS.CPVar ifcmodid] [] $
           BS.Cdo False
             [ BS.CSBind (BS.CPVar ifcargid) Nothing [] (BS.CVar ifcmodid)
@@ -150,6 +138,19 @@ compileBS _bsSettings prefix spec =
 
     ifcid     = BS.mkId BS.NoPos $ fromString $ specinterfacename prefix
     ifcfields = mkspecifcfields triggers exts
+    ifcty     = BS.TCon (BS.TyCon
+                  { BS.tcon_name = ifcid
+                  , BS.tcon_kind = Just BS.KStar
+                  , BS.tcon_sort = BS.TIstruct
+                                     (BS.SInterface [])
+                                     (map BS.cf_name ifcfields)
+                  })
+
+    emptyty = BS.TCon (BS.TyCon
+                { BS.tcon_name = BS.idEmpty
+                , BS.tcon_kind = Just BS.KStar
+                , BS.tcon_sort = BS.TIstruct (BS.SInterface []) []
+                })
 
     -- Make buffer and index declarations for streams.
     mkglobals :: [BS.CStmt]

@@ -105,7 +105,9 @@ mkaccessdecln sid ty xs =
                        ]
                    , bufflength
                    ]
-    indexexpr  = cSelect (BS.CVar (BS.mkId BS.NoPos (fromString (streamname sid)))) index
+    indexexpr  = cIndexVector
+                   (BS.CVar (BS.mkId BS.NoPos (fromString (streamname sid))))
+                   index
     expr       = BS.CSelect indexexpr (BS.id_read BS.NoPos)
 
 -- | Define fields for a module interface containing a specification's trigger
@@ -169,7 +171,7 @@ mksteprule streams =
           BS.CSExpr Nothing $
           BS.Cwrite
             BS.NoPos
-            (cSelect (BS.CVar buffid) (BS.CVar indexid))
+            (cIndexVector (BS.CVar buffid) (BS.CVar indexid))
             (BS.CVar genid)
 
         indexupdate =
@@ -208,6 +210,25 @@ mkstructdecln x =
     mkstructfield :: Value a -> BS.CField
     mkstructfield (Value ty field) = mkfield (fieldname field) (transType ty)
 
+mkfield :: String -> BS.CType -> BS.CField
+mkfield name ty =
+  BS.CField
+    { BS.cf_name = BS.mkId BS.NoPos $ fromString name
+    , BS.cf_pragmas = Nothing
+    , BS.cf_type = BS.CQType [] ty
+    , BS.cf_default = []
+    , BS.cf_orig_type = Nothing
+    }
+
+tReg :: BS.CType
+tReg = BS.TCon $
+  BS.TyCon
+    { BS.tcon_name = BS.idReg
+    , BS.tcon_kind = Just (BS.Kfun BS.KStar BS.KStar)
+    , BS.tcon_sort = BS.TIstruct (BS.SInterface [])
+                                 [BS.id_write BS.NoPos, BS.id_read BS.NoPos]
+    }
+
 -- | List all types of an expression, returns items uniquely.
 -- TODO RGS: This is copy-pasted directly from copilot-c99. Factor it out somewhere?
 exprtypes :: Typeable a => Expr a -> [UType]
@@ -240,24 +261,3 @@ gatherexprs streams triggers =  map streamexpr streams
   where
     streamexpr  (Stream _ _ expr ty)   = UExpr ty expr
     triggerexpr (Trigger _ guard args) = UExpr Bool guard : args
-
--- TODO RGS: The definitions below probably deserve another home
-
-mkfield :: String -> BS.CType -> BS.CField
-mkfield name ty =
-  BS.CField
-    { BS.cf_name = BS.mkId BS.NoPos $ fromString name
-    , BS.cf_pragmas = Nothing
-    , BS.cf_type = BS.CQType [] ty
-    , BS.cf_default = []
-    , BS.cf_orig_type = Nothing
-    }
-
-tReg :: BS.CType
-tReg = BS.TCon $
-  BS.TyCon
-    { BS.tcon_name = BS.idReg
-    , BS.tcon_kind = Just (BS.Kfun BS.KStar BS.KStar)
-    , BS.tcon_sort = BS.TIstruct (BS.SInterface [])
-                                 [BS.id_write BS.NoPos, BS.id_read BS.NoPos]
-    }

@@ -149,17 +149,23 @@ mktriggerrule (Trigger name _ args) =
     args'   = take (length args) (map argcall (argnames name))
     argcall = BS.CVar . BS.mkId BS.NoPos . fromString
 
--- | Writes the step rule, that updates all streams.
-mksteprule :: [Stream] -> BS.CRule
-mksteprule streams =
+-- | Writes the @step@ rule that updates all streams.
+mksteprule :: [Stream] -> Maybe BS.CRule
+mksteprule streams
+  | null allupdates
+  = -- If there is nothing to update, don't bother creating a step rule.
+    -- Doing so wouldn't harm anything, but bsc will generate a warning
+    -- when compiling such an empty rule.
+    Nothing
+  | otherwise
+  = Just $
     BS.CRule
       []
-      Nothing
+      (Just $ cLit $ BS.LString "step")
       [BS.CQFilter $ BS.CCon BS.idTrue []]
-      -- NB: Use Caction instead of Cdo here. Caction permits an empty list of
-      -- statements, whereas Cdo does not.
-      (BS.Caction BS.NoPos $ bufferupdates ++ indexupdates)
+      (BS.Caction BS.NoPos allupdates)
   where
+    allupdates = bufferupdates ++ indexupdates
     (bufferupdates, indexupdates) = unzip $ map mkupdateglobals streams
 
     -- Write code to update global stream buffers and index.

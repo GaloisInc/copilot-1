@@ -82,7 +82,8 @@ transOp1 op e =
     GetField (Struct _)  _ f -> BS.CSelect e $ BS.mkId BS.NoPos $
                                 fromString $ accessorname f
 
-    -- Unsupported operations
+    -- Unsupported operations (see
+    -- https://github.com/B-Lang-org/bsc/discussions/534)
     Exp     _ty -> unsupportedFPOp "exp"
     Log     _ty -> unsupportedFPOp "log"
     Acos    _ty -> unsupportedFPOp "acos"
@@ -97,9 +98,6 @@ transOp1 op e =
     Cosh    _ty -> unsupportedFPOp "cosh"
     Sinh    _ty -> unsupportedFPOp "sinh"
     Tanh    _ty -> unsupportedFPOp "tanh"
-
-    -- TODO RGS: These should be doable, but I need to understand the type
-    -- signature of FloatingPoint.round first
     Ceiling _ty -> unsupportedFPOp "ceiling"
     Floor   _ty -> unsupportedFPOp "floor"
   where
@@ -131,7 +129,8 @@ transOp2 op e1 e2 =
     BwShiftR _ _ -> app $ BS.idRshAt BS.NoPos
     Index    _   -> cSelect e1 e2
 
-    -- Unsupported operation
+    -- Unsupported operations (see
+    -- https://github.com/B-Lang-org/bsc/discussions/534)
     Pow      _ty -> unsupportedFPOp "(**)"
     Logb     _ty -> unsupportedFPOp "logb"
     Atan2    _ty -> unsupportedFPOp "atan2"

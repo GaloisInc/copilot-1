@@ -1,3 +1,5 @@
 packages:
   */*.cabal
-  ./language-bluespec -- TODO RGS: Upload this to Hackage, then remove this line and the submodule
+
+ -- TODO RGS: Upload this to Hackage, then remove this line and the submodule
+ ./language-bluespec

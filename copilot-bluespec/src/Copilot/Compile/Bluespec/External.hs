@@ -3,13 +3,15 @@
 -- for stream declarations and triggers.
 module Copilot.Compile.Bluespec.External where
 
--- External modules
-import Data.List  (unionBy)
-import Data.Maybe (catMaybes)
+import Data.List (unionBy)
 
--- External modules: Copilot
 import Copilot.Core
-import Copilot.Core.Extra
+
+-----
+-- TODO RGS: Almost everything here is copy-pasted directly from copilot-c99.
+-- The only difference is that External lacks an extcpyname field, as we don't
+-- need to do copying of externals in Bluespec. Should we factor out this code somewhere?
+-----
 
 -- | Representation of external variables.
 data External = forall a. External

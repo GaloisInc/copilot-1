@@ -5,6 +5,32 @@ import Data.Char (toUpper)
 
 import Copilot.Core (Id)
 
+-- | Turn a specification name into the name of its module interface.
+specinterfacename :: String -> String
+specinterfacename prefix = prefix ++ "Ifc"
+
+-- | Turn a specification name into the name of the module that declares its
+-- struct types.
+spectypesname :: String -> String
+spectypesname prefix = prefix ++ "Types"
+
+-- | The name of the variable of type @<prefix>Ifc@. This is used to select
+-- trigger functions and external variables.
+ifcargname :: String
+ifcargname = "ifc"
+
+-- | Turn a Copilot struct name (e.g., @foo@) into the name of a Bluespec
+-- struct (e.g., @Foo@).
+--
+-- TODO RGS: This smells a bit funny. Ask Ivan about this...
+structname :: String -> String
+structname []     = []
+structname (c:cs) = toUpper c:cs
+
+-----
+-- TODO RGS: Everything below is copy-pasted directly from copilot-c99. Factor it out somewhere?
+-----
+
 -- | Turn a stream id into a suitable Bluespec variable name.
 streamname :: Id -> String
 streamname sid = "s" ++ show sid
@@ -41,24 +67,3 @@ argTempName name n = name ++ "_arg_temp" ++ show n
 -- | Enumerate all argument names based on trigger name.
 argnames :: String -> [String]
 argnames base = map (argname base) [0..]
-
--- | Turn a specification name into the name of its module interface.
-specinterfacename :: String -> String
-specinterfacename prefix = prefix ++ "Ifc"
-
--- | Turn a specification name into the name of the module that declares its
--- struct types.
-spectypesname :: String -> String
-spectypesname prefix = prefix ++ "Types"
-
--- | The name of the variable of type @<prefix>Ifc@. This is used to select
--- trigger functions and external variables.
-ifcargname :: String
-ifcargname = "ifc"
-
--- | Turn a Copilot struct name into the name of a Bluespec struct.
---
--- TODO RGS: This smells a bit funny. Ask Ivan about this...
-structname :: String -> String
-structname []     = []
-structname (c:cs) = toUpper c:cs

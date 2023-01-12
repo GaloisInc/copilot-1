@@ -7,7 +7,7 @@ module Copilot.Compile.Bluespec.Compile
   ) where
 
 import Data.List                      (nub)
-import Data.Maybe                     (catMaybes)
+import Data.Maybe                     (catMaybes, maybeToList)
 import Data.String                    (IsString (..))
 import Text.PrettyPrint.HughesPJClass (Pretty (..), render)
 import System.Directory               (createDirectoryIfMissing)
@@ -113,16 +113,12 @@ compileBS _bsSettings prefix spec =
             `BS.TAp` (BS.tModule `BS.TAp` ifcty)
             `BS.TAp` (BS.tModule `BS.TAp` emptyty)))
         [ BS.CClause [BS.CPVar ifcmodid] [] $
-          BS.Cdo False
-            [ BS.CSBind (BS.CPVar ifcargid) Nothing [] (BS.CVar ifcmodid)
-            , BS.CSExpr Nothing $
-              BS.Cmodule BS.NoPos $
-               map BS.CMStmt mkglobals ++
-               [ BS.CMStmt $ BS.CSletrec genfuns
-               ] ++
-               [ BS.CMrules $
-                 BS.Crules [] rules
-               ]
+          BS.Cmodule BS.NoPos $
+              BS.CMStmt
+                (BS.CSBind (BS.CPVar ifcargid) Nothing [] (BS.CVar ifcmodid))
+            : map BS.CMStmt mkglobals ++
+            [ BS.CMStmt $ BS.CSletrec genfuns
+            , BS.CMrules $ BS.Crules [] rules
             ]
         ]
 
@@ -130,7 +126,7 @@ compileBS _bsSettings prefix spec =
     ifcmodid = BS.mkId BS.NoPos "ifcMod"
 
     rules :: [BS.CRule]
-    rules = map mktriggerrule triggers ++ [mksteprule streams]
+    rules = map mktriggerrule triggers ++ maybeToList (mksteprule streams)
 
     streams  = specStreams spec
     triggers = specTriggers spec

@@ -82,9 +82,10 @@ interface FibsIfc =
   odd :: UInt 32 -> Action
 
 mkFibs :: Module FibsIfc -> Module Empty
-mkFibs ifcMod = do
-  ifc <- ifcMod
+mkFibs ifcMod =
   module
+    ifc <- ifcMod
+
     s0_0 :: Reg (UInt 32) <- mkReg 1
     s0_1 :: Reg (UInt 32) <- mkReg 1
     let s0 :: Vector 2 (Reg (UInt 32))
@@ -112,9 +113,10 @@ mkFibs ifcMod = do
       "odd:": when odd_guard ==>
         ifc.odd (s0_get 0)
 
-      "step": when True ==> do
-        select s0 s0_idx := s0_gen
-        s0_idx := (s0_idx + 1) % 2
+      "step": when True ==>
+        action
+          select s0 s0_idx := s0_gen
+          s0_idx := (s0_idx + 1) % 2
 ```
 
 (Note that the actual code is machine-generated and somewhat more difficult to

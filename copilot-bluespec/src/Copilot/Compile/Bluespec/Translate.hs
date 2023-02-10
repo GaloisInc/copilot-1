@@ -70,36 +70,33 @@ transOp1 op e =
     Recip    ty -> BS.CApply
                      (BS.CVar (BS.idSlashAt BS.NoPos))
                      [constNumTy ty 1, e]
+    Acos    _ty -> app $ BS.mkId BS.NoPos "acos"
+    Asin    _ty -> app $ BS.mkId BS.NoPos "asin"
+    Atan    _ty -> app $ BS.mkId BS.NoPos "atan"
+    Cos     _ty -> app $ BS.mkId BS.NoPos "cos"
+    Sin     _ty -> app $ BS.mkId BS.NoPos "sin"
+    Tan     _ty -> app $ BS.mkId BS.NoPos "tan"
+    Acosh   _ty -> app $ BS.mkId BS.NoPos "acosh"
+    Asinh   _ty -> app $ BS.mkId BS.NoPos "asinh"
+    Atanh   _ty -> app $ BS.mkId BS.NoPos "atanh"
+    Cosh    _ty -> app $ BS.mkId BS.NoPos "cosh"
+    Sinh    _ty -> app $ BS.mkId BS.NoPos "sinh"
+    Tanh    _ty -> app $ BS.mkId BS.NoPos "tanh"
+    Exp     _ty -> app $ BS.mkId BS.NoPos "exp_e"
+    Log     _ty -> app $ BS.mkId BS.NoPos "log"
     BwNot   _ty -> app $ BS.idInvertAt BS.NoPos
     Sqrt    _ty -> BS.CSelect
                      (BS.CApply
                        (BS.CVar (BS.mkId BS.NoPos "sqrtFP"))
                        [e, defaultRoundMode])
                      BS.idPrimFst
+    Ceiling _ty -> app $ BS.mkId BS.NoPos "ceil"
+    Floor   _ty -> app $ BS.mkId BS.NoPos "floor"
 
     Cast fromTy toTy -> transCast fromTy toTy e
     GetField (Struct _)  _ f -> BS.CSelect e $ BS.mkId BS.NoPos $
                                 fromString $ accessorname f
     GetField _ _ _ -> impossible "transOp1" "copilot-bluespec"
-
-    -- Unsupported operations (see
-    -- https://github.com/B-Lang-org/bsc/discussions/534)
-    Exp     _ty -> unsupportedFPOp "exp"
-    Log     _ty -> unsupportedFPOp "log"
-    Acos    _ty -> unsupportedFPOp "acos"
-    Asin    _ty -> unsupportedFPOp "asin"
-    Atan    _ty -> unsupportedFPOp "atan"
-    Cos     _ty -> unsupportedFPOp "cos"
-    Sin     _ty -> unsupportedFPOp "sin"
-    Tan     _ty -> unsupportedFPOp "tan"
-    Acosh   _ty -> unsupportedFPOp "acosh"
-    Asinh   _ty -> unsupportedFPOp "asinh"
-    Atanh   _ty -> unsupportedFPOp "atanh"
-    Cosh    _ty -> unsupportedFPOp "cosh"
-    Sinh    _ty -> unsupportedFPOp "sinh"
-    Tanh    _ty -> unsupportedFPOp "tanh"
-    Ceiling _ty -> unsupportedFPOp "ceiling"
-    Floor   _ty -> unsupportedFPOp "floor"
   where
     app i = BS.CApply (BS.CVar i) [e]
 
@@ -116,6 +113,9 @@ transOp2 op e1 e2 =
     Mod      _ty -> app $ BS.idPercentAt BS.NoPos
     Div      _ty -> app $ BS.idSlashAt BS.NoPos
     Fdiv     _ty -> app $ BS.idSlashAt BS.NoPos
+    Pow      _ty -> app $ BS.idStarStarAt BS.NoPos
+    Logb     _ty -> app $ BS.mkId BS.NoPos "logb"
+    Atan2    _ty -> app $ BS.mkId BS.NoPos "atan2"
     Eq       _   -> app BS.idEqual
     Ne       _   -> app BS.idNotEqual
     Le       _   -> app $ BS.idLtEqAt BS.NoPos
@@ -128,12 +128,6 @@ transOp2 op e1 e2 =
     BwShiftL _ _ -> app $ BS.idLshAt BS.NoPos
     BwShiftR _ _ -> app $ BS.idRshAt BS.NoPos
     Index    _   -> cIndexVector e1 e2
-
-    -- Unsupported operations (see
-    -- https://github.com/B-Lang-org/bsc/discussions/534)
-    Pow      _ty -> unsupportedFPOp "(**)"
-    Logb     _ty -> unsupportedFPOp "logb"
-    Atan2    _ty -> unsupportedFPOp "atan2"
   where
     app i = BS.CApply (BS.CVar i) [e1, e2]
 

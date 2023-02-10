@@ -1,8 +1,6 @@
 -- | Auxiliary helper functions to generate Bluespec code.
 module Copilot.Compile.Bluespec.Util where
 
-import Data.Char (toUpper)
-
 import Copilot.Core (Id)
 
 -- | Turn a specification name into the name of its module interface.
@@ -19,13 +17,13 @@ spectypesname prefix = prefix ++ "Types"
 ifcargname :: String
 ifcargname = "ifc"
 
--- | Turn a Copilot struct name (e.g., @foo@) into the name of a Bluespec
--- struct (e.g., @Foo@).
---
--- TODO RGS: This smells a bit funny. Ask Ivan about this...
+-- | Turn a Copilot struct name into the name of a Bluespec struct by prepending
+-- the @BS_@ prefix (short for \"Bluespec\") at the front. This is done because
+-- Bluespec requires all struct definitions to begin with an uppercase letter,
+-- so prepending a prefix ensures that this requirement is meant while
+-- regardless of how the original Copilot struct name is capitalized.
 structname :: String -> String
-structname []     = []
-structname (c:cs) = toUpper c:cs
+structname n = "BS_" ++ n
 
 -----
 -- TODO RGS: Everything below is copy-pasted directly from copilot-c99. Factor it out somewhere?

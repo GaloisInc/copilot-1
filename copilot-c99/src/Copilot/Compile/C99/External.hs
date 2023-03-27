@@ -38,7 +38,7 @@ gatherExts streams triggers = streamsExts `extUnion` triggersExts
     streamExts (Stream _ _ expr _) = exprExts expr
 
     triggerExts :: Trigger -> [External]
-    triggerExts (Trigger _ guard args) = guardExts `extUnion` argExts
+    triggerExts (Trigger _ guard args _) = guardExts `extUnion` argExts
       where
         guardExts = exprExts guard
         argExts   = concatMap uExprExts args

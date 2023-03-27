@@ -123,7 +123,7 @@ compileC cSettings spec = C.TransUnit declns funs
           exprGen (generatorName sId) (generatorOutputArgName sId) expr ty
 
         triggerGen :: Trigger -> [C.FunDef]
-        triggerGen (Trigger name guard args) = guardDef : argDefs
+        triggerGen (Trigger name guard args _) = guardDef : argDefs
           where
             guardDef = mkGenFun (guardName name) guard Bool
             argDefs  = zipWith argGen (argNames name) args
@@ -174,7 +174,7 @@ compileH cSettings spec = C.TransUnit declns []
     extFunDeclns = map extFunDecln
       where
         extFunDecln :: Trigger -> C.Decln
-        extFunDecln (Trigger name _ args) = C.FunDecln Nothing cTy name params
+        extFunDecln (Trigger name _ args _) = C.FunDecln Nothing cTy name params
           where
             cTy    = C.TypeSpec C.Void
             params = zipWith mkParam (argNames name) args
@@ -255,4 +255,4 @@ gatherExprs streams triggers =  map streamUExpr streams
                              ++ concatMap triggerUExpr triggers
   where
     streamUExpr  (Stream _ _ expr ty)   = UExpr ty expr
-    triggerUExpr (Trigger _ guard args) = UExpr Bool guard : args
+    triggerUExpr (Trigger _ guard args _) = UExpr Bool guard : args

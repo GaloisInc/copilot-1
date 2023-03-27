@@ -263,7 +263,7 @@ mkStep cSettings streams triggers exts =
     --    any modifications that the handler called makes to the struct argument
     --    will not affect the internals of the monitoring code.
     mkTriggerCheck :: Trigger -> ([C.Decln], C.Stmt)
-    mkTriggerCheck (Trigger name _guard args) =
+    mkTriggerCheck (Trigger name _guard args _) =
         (aTmpDeclns, triggerCheckStmt)
       where
         aTmpDeclns :: [C.Decln]

@@ -42,7 +42,7 @@ import qualified Copilot.Core as Core
 import Copilot.Language.Stream
 
 import Copilot.Theorem.Prove
-import GHC.Stack (HasCallStack, CallStack, callStack)
+import GHC.Stack (HasCallStack)
 
 -- | A specification is a list of declarations of triggers, observers,
 -- properties and theorems.
@@ -140,7 +140,7 @@ observer name e = tell [ObserverItem $ Observer name e]
 -- | A trigger, representing a function we execute when a boolean stream becomes
 -- true at a sample.
 data Trigger where
-  Trigger :: Core.Name -> Stream Bool -> [Arg] -> CallStack -> Trigger
+  Trigger :: HasCallStack => Core.Name -> Stream Bool -> [Arg] -> Trigger
 
 -- | Define a new trigger as part of a specification. A trigger declares which
 -- external function, or handler, will be called when a guard defined by a
@@ -150,34 +150,34 @@ trigger :: HasCallStack
         -> Stream Bool  -- ^ The stream used as the guard for the trigger.
         -> [Arg]        -- ^ List of arguments to the handler.
         -> Spec
-trigger name e args = tell [TriggerItem $ Trigger name e args callStack]
+trigger name e args = tell [TriggerItem $ Trigger name e args]
 
 -- | A property, representing a boolean stream that is existentially or
 -- universally quantified over time.
 data Property where
-  Property :: String -> Stream Bool -> CallStack -> Property
+  Property :: HasCallStack => String -> Stream Bool -> Property
 
 -- | A proposition, representing the quantification of a boolean streams over
 -- time.
 data Prop a where
-  Forall :: Stream Bool -> Prop Universal
-  Exists :: Stream Bool -> Prop Existential
+  Forall :: HasCallStack => Stream Bool -> Prop Universal
+  Exists :: HasCallStack => Stream Bool -> Prop Existential
 
 -- | Universal quantification of boolean streams over time.
-forAll :: Stream Bool -> Prop Universal
+forAll :: HasCallStack => Stream Bool -> Prop Universal
 forAll = Forall
 
 {-# DEPRECATED forall "Use forAll instead." #-}
 -- | Universal quantification of boolean streams over time.
-forall :: Stream Bool -> Prop Universal
+forall :: HasCallStack => Stream Bool -> Prop Universal
 forall = forAll
 
 -- | Existential quantification of boolean streams over time.
-exists :: Stream Bool -> Prop Existential
+exists :: HasCallStack => Stream Bool -> Prop Existential
 exists = Exists
 
 -- | Extract the underlying stream from a quantified proposition.
-extractProp :: Prop a -> Stream Bool
+extractProp :: HasCallStack => Prop a -> Stream Bool
 extractProp (Forall p) = p
 extractProp (Exists p) = p
 
@@ -187,7 +187,7 @@ extractProp (Exists p) = p
 -- This function returns, in the monadic context, a reference to the
 -- proposition.
 prop :: HasCallStack => String -> Prop a -> Writer [SpecItem] (PropRef a)
-prop name e = tell [PropertyItem $ Property name (extractProp e) callStack]
+prop name e = tell [PropertyItem $ Property name (extractProp e)]
   >> return (PropRef name)
 
 -- | A theorem, or proposition together with a proof.
@@ -195,7 +195,7 @@ prop name e = tell [PropertyItem $ Property name (extractProp e) callStack]
 -- This function returns, in the monadic context, a reference to the
 -- proposition.
 theorem :: HasCallStack => String -> Prop a -> Proof a -> Writer [SpecItem] (PropRef a)
-theorem name e (Proof p) = tell [TheoremItem (Property name (extractProp e) callStack, p)]
+theorem name e (Proof p) = tell [TheoremItem (Property name (extractProp e), p)]
   >> return (PropRef name)
 
 -- | Construct a function argument from a stream.
@@ -205,7 +205,7 @@ theorem name e (Proof p) = tell [TheoremItem (Property name (extractProp e) call
 -- property violations. At any given point (e.g., when the trigger must be
 -- called due to a violation), the arguments passed using 'arg' will contain
 -- the current samples of the given streams.
-arg :: Typed a => Stream a -> Arg
+arg :: (HasCallStack, Typed a) => Stream a -> Arg
 arg = Arg
 
 -- | Wrapper to use 'Stream's as arguments to triggers.

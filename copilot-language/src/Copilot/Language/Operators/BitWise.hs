@@ -17,6 +17,7 @@ import Copilot.Core (Typed, typeOf)
 import qualified Copilot.Core as Core
 import Copilot.Language.Stream
 import qualified Prelude as P
+import GHC.Stack (HasCallStack)
 
 #if MIN_VERSION_base(4,17,0)
 import Data.Bits hiding ((.>>.), (.<<.))
@@ -49,11 +50,11 @@ instance (Typed a, Bits a) => Bits (Stream a) where
 #endif
 
 -- | Shifting values of a stream to the left.
-(.<<.) :: (Bits a, Typed a, Typed b, P.Integral b)
+(.<<.) :: (HasCallStack, Bits a, Typed a, Typed b, P.Integral b)
        => Stream a -> Stream b -> Stream a
 (.<<.) = Op2 (Core.BwShiftL typeOf typeOf)
 
 -- | Shifting values of a stream to the right.
-(.>>.) :: (Bits a, Typed a, Typed b, P.Integral b)
+(.>>.) :: (HasCallStack, Bits a, Typed a, Typed b, P.Integral b)
        => Stream a -> Stream b -> Stream a
 (.>>.) = Op2 (Core.BwShiftR typeOf typeOf)

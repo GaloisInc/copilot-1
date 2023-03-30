@@ -35,7 +35,7 @@ gatherExts streams triggers = streamsExts `extUnion` triggersExts
     triggersExts = foldr (extUnion . triggerExts) mempty triggers
 
     streamExts :: Stream -> [External]
-    streamExts (Stream _ _ expr _) = exprExts expr
+    streamExts (Stream _ _ expr _ _) = exprExts expr
 
     triggerExts :: Trigger -> [External]
     triggerExts (Trigger _ guard args _) = guardExts `extUnion` argExts

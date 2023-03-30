@@ -185,7 +185,7 @@ mkStep cSettings streams triggers exts =
 
     -- Write code to update global stream buffers and index.
     mkUpdateGlobals :: Stream -> (C.Decln, C.Stmt, C.Stmt, C.Stmt)
-    mkUpdateGlobals (Stream sId buff _expr ty) =
+    mkUpdateGlobals (Stream sId buff _expr ty _) =
       (tmpDecln, tmpAssign, bufferUpdate, indexUpdate)
         where
           tmpDecln = C.VarDecln Nothing cTy tmpVar Nothing

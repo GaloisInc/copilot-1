@@ -106,8 +106,8 @@ compileC cSettings spec = C.TransUnit declns funs
     mkGlobals streamList =  map buffDecln streamList
                          ++ map indexDecln streamList
       where
-        buffDecln  (Stream sId buff _ ty) = mkBuffDecln  sId ty buff
-        indexDecln (Stream sId _    _ _ ) = mkIndexDecln sId
+        buffDecln  (Stream sId buff _ ty _) = mkBuffDecln  sId ty buff
+        indexDecln (Stream sId _    _ _  _) = mkIndexDecln sId
 
     -- Make generator functions, including trigger arguments.
     mkGenFuns :: [Stream] -> [Trigger] -> [C.FunDef]
@@ -116,10 +116,10 @@ compileC cSettings spec = C.TransUnit declns funs
                                      ++ concatMap triggerGen triggerList
       where
         accessDecln :: Stream -> C.FunDef
-        accessDecln (Stream sId buff _ ty) = mkAccessDecln sId ty buff
+        accessDecln (Stream sId buff _ ty _) = mkAccessDecln sId ty buff
 
         streamGen :: Stream -> C.FunDef
-        streamGen (Stream sId _ expr ty) =
+        streamGen (Stream sId _ expr ty _) =
           exprGen (generatorName sId) (generatorOutputArgName sId) expr ty
 
         triggerGen :: Trigger -> [C.FunDef]
@@ -254,5 +254,5 @@ gatherExprs :: [Stream] -> [Trigger] -> [UExpr]
 gatherExprs streams triggers =  map streamUExpr streams
                              ++ concatMap triggerUExpr triggers
   where
-    streamUExpr  (Stream _ _ expr ty)   = UExpr ty expr
+    streamUExpr  (Stream _ _ expr ty _)   = UExpr ty expr
     triggerUExpr (Trigger _ guard args _) = UExpr Bool guard : args

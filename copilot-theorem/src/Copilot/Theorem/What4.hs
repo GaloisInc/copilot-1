@@ -71,6 +71,7 @@ import LibBF (BigFloat, bfToDouble, pattern NearEven)
 import qualified Panic as Panic
 
 import Copilot.Theorem.What4.Translate
+import qualified GHC.Stack as GHCS
 
 -- 'prove' function
 --
@@ -226,7 +227,7 @@ data BisimulationProofBundle sym =
       -- 2. The type of the stream
       --
       -- 3. The value of the stream represented as a fresh constant
-    , triggerState :: [(CE.Name, WI.Pred sym, [(Some CT.Type, XExpr sym)])]
+    , triggerState :: [(CE.Name, WI.Pred sym, [(Some CT.Type, XExpr sym)], GHCS.CallStack)]
       -- ^ A list of trigger functions, where each tuple contains:
       --
       -- 1. The name of the function
@@ -312,17 +313,17 @@ computeTriggerState ::
   => sym
   -> CS.Spec
   -- ^ The input Copilot specification
-  -> TransM sym [(CE.Name, WI.Pred sym, [(Some CT.Type, XExpr sym)])]
+  -> TransM sym [(CE.Name, WI.Pred sym, [(Some CT.Type, XExpr sym)], GHCS.CallStack)]
 computeTriggerState sym spec = forM (CS.specTriggers spec) $
     \(CS.Trigger { CS.triggerName = nm, CS.triggerGuard = guard
-                 , CS.triggerArgs = args }) ->
+                 , CS.triggerArgs = args, CS.triggerCallStack = callStack }) ->
       do xguard <- translateExpr sym mempty guard (RelativeOffset 0)
          guard' <-
            case xguard of
              XBool guard' -> return guard'
              _ -> expectedBool "Trigger guard" xguard
          args' <- mapM computeArg args
-         return (nm, guard', args')
+         return (nm, guard', args', callStack)
   where
    computeArg (CE.UExpr { CE.uExprType = tp, CE.uExprExpr = ex }) = do
      v <- translateExpr sym mempty ex (RelativeOffset 0)

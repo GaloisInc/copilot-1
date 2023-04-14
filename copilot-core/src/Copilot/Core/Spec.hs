@@ -36,6 +36,10 @@ import GHC.Stack (CallStack)
 -- Stream can carry different types of data. Boolean streams play a special
 -- role: they are used by other parts (e.g., 'Trigger') to detect when the
 -- properties being monitored are violated.
+-- 
+-- CallStacks are added to ensure that we can obtain the location (file,
+-- line, and column number) in the specification of the function that
+-- constructed the Stream.
 data Stream = forall a . (Typeable a, Typed a) => Stream
   { streamId        :: Id
   , streamBuffer    :: [a]
@@ -54,6 +58,10 @@ data Observer = forall a . Typeable a => Observer
 
 -- | A trigger, representing a function we execute when a boolean stream becomes
 -- true at a sample.
+-- 
+-- CallStacks are added to ensure that we can obtain the location (file,
+-- line, and column number) in the specification of the function that
+-- constructed the Trigger.
 data Trigger = Trigger
   { triggerName      :: Name
   , triggerGuard     :: Expr Bool
@@ -63,6 +71,10 @@ data Trigger = Trigger
 
 -- | A property, representing a boolean stream that is existentially or
 -- universally quantified over time.
+-- 
+-- CallStacks are added to ensure that we can obtain the location (file,
+-- line, and column number) in the specification of the function that
+-- constructed the Property.
 data Property = Property
   { propertyName      :: Name
   , propertyExpr      :: Expr Bool

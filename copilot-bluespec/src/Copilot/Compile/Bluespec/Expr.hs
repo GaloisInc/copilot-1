@@ -444,7 +444,9 @@ cLit = BS.CLit . BS.CLiteral BS.NoPos
 -- | Create a Bluespec expression that indexes into a @Vector@.
 cIndexVector :: BS.CExpr -> BS.CExpr -> BS.CExpr
 cIndexVector vec idx =
-  BS.CApply (BS.CVar (BS.mkId BS.NoPos "select")) [vec, idx]
+  BS.CApply
+    (BS.CVar (BS.idPrimSelectFn BS.NoPos))
+    [BS.CVar BS.idNoPosition, vec, idx]
 
 -- | Explicitly annotate an expression with a type signature. This is necessary
 -- to prevent expressions from having ambiguous types in certain situations.

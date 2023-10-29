@@ -77,9 +77,10 @@ transOp1 op e =
     -- Bluespec's Arith class does not have a `recip` method corresponding to
     -- Haskell's `recip` in the `Fractional` class, so we implement it
     -- ourselves.
-    Recip    ty -> BS.CApply
-                     (BS.CVar (BS.idSlashAt BS.NoPos))
-                     [constNumTy ty 1, e]
+    Recip    ty -> BS.CBinOp
+                     (constNumTy ty 1)
+                     (BS.idSlashAt BS.NoPos)
+                     e
     BwNot   _ty -> app $ BS.idInvertAt BS.NoPos
     Sqrt    _ty -> BS.CSelect
                      (BS.CApply
@@ -145,7 +146,7 @@ transOp2 op e1 e2 =
     Logb     _ty -> unsupportedFPOp "logb"
     Atan2    _ty -> unsupportedFPOp "atan2"
   where
-    app i = BS.CApply (BS.CVar i) [e1, e2]
+    app i = BS.CBinOp e1 i e2
 
 -- | Translates a Copilot ternary operator and its arguments into a Bluespec
 -- function.

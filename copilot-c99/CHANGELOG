@@ -1,3 +1,7 @@
+202?-??-??
+        * Fix bug where trigger argument functions would generate incorrect
+          code for constant array streams (#431).
+
 2023-11-07
         * Version bump (3.17). (#466)
         * Replace uses of deprecated functions. (#457)

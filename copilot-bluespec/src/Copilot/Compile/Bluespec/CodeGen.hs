@@ -1,158 +1,178 @@
-{-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+
 -- | High-level translation of Copilot Core into Bluespec.
-module Copilot.Compile.Bluespec.CodeGen where
+module Copilot.Compile.Bluespec.CodeGen
+  ( -- * Type declarations
+    mkStructDecln
 
-import Data.List     (union)
-import Data.String   (IsString (..))
-import Data.Typeable (Typeable)
+    -- * Ring buffers
+  , mkBuffDecln
+  , mkIndexDecln
+  , mkAccessDecln
 
-import Copilot.Core
-import Copilot.Compile.Bluespec.External
-import Copilot.Compile.Bluespec.Translate
-import Copilot.Compile.Bluespec.Util
+    -- * Stream generators
+  , mkGenFun
 
+    -- * Monitor processing
+  , mkStepRule
+  , mkTriggerRule
+
+    -- * Module interface specifications
+  , mkSpecIfcFields
+  ) where
+
+-- External imports
+import Data.String (IsString (..))
 import qualified Language.Bluespec.Classic.AST as BS
 import qualified Language.Bluespec.Classic.AST.Builtin.Ids as BS
 import qualified Language.Bluespec.Classic.AST.Builtin.Types as BS
 
+-- Internal imports: Copilot
+import Copilot.Core
+
+-- Internal imports
+import Copilot.Compile.Bluespec.Expr
+import Copilot.Compile.Bluespec.External
+import Copilot.Compile.Bluespec.Name
+import Copilot.Compile.Bluespec.Type
+
 -- | Write a generator function for a stream.
-genfun :: String -> Expr a -> Type a -> BS.CDefl
-genfun name expr ty =
+mkGenFun :: String -> Expr a -> Type a -> BS.CDefl
+mkGenFun name expr ty =
     -- name :: ty
     -- name = expr
     BS.CLValueSign
-      (BS.CDef nameid (BS.CQType [] (transType ty)) [def])
+      (BS.CDef nameId (BS.CQType [] (transType ty)) [def])
       []
   where
-    nameid = BS.mkId BS.NoPos $ fromString name
+    nameId = BS.mkId BS.NoPos $ fromString name
     def = BS.CClause [] [] (transExpr expr)
 
 -- | Bind a buffer variable and initialise it with the stream buffer.
-mkbuffdecln :: forall a. Id -> Type a -> [a] -> [BS.CStmt]
-mkbuffdecln sid ty xs =
-    initvals ++ [BS.CSletrec [initbufsig]]
+mkBuffDecln :: forall a. Id -> Type a -> [a] -> [BS.CStmt]
+mkBuffDecln sId ty xs =
+    initVals ++ [BS.CSletrec [initBufSig]]
   where
-    -- sid_0     :: Reg <ty> <- mkReg xs_0
+    -- sId_0     :: Reg <ty> <- mkReg xs_0
     -- ...
-    -- sid_(n-1) :: Reg <ty> <- mkReg xs_(n-1)
-    initvals = zipWith mkinitval xs [0..]
-    -- sid :: Vector n (Reg <ty>)
-    -- sid = update (... (update newVector 0 xs_0) ...) (n-1) xs_(n-1)
-    initbufsig = BS.CLValueSign
-                   (BS.CDef nameid (BS.CQType [] vecty) [initbufdef])
+    -- sId_(n-1) :: Reg <ty> <- mkReg xs_(n-1)
+    initVals = zipWith mkInitVal xs [0..]
+    -- sId :: Vector n (Reg <ty>)
+    -- sId = update (... (update newVector 0 sId_0) ...) (n-1) sId_(n-1)
+    initBufSig = BS.CLValueSign
+                   (BS.CDef nameId (BS.CQType [] vecTy) [initBufDef])
                    []
-    initbufdef = BS.CClause
+    initBufDef = BS.CClause
                    []
                    []
                    (genVector
                      (\idx _ -> BS.CVar $ BS.mkId BS.NoPos $
-                                fromString $ streamelemname sid idx)
+                                fromString $ streamElemName sId idx)
                      xs)
 
-    nameid   = BS.mkId BS.NoPos $ fromString $ streamname sid
-    bsty     = tReg `BS.TAp` transType ty
-    vecty    = tVector `BS.TAp` BS.cTNum numelems BS.NoPos `BS.TAp` bsty
-    numelems = toInteger $ length xs
+    nameId   = BS.mkId BS.NoPos $ fromString $ streamName sId
+    bsTy     = tReg `BS.TAp` transType ty
+    vecTy    = tVector `BS.TAp` BS.cTNum numElems BS.NoPos `BS.TAp` bsTy
+    numElems = toInteger $ length xs
 
-    mkinitval :: a -> Int -> BS.CStmt
-    mkinitval x elemnum =
+    mkInitVal :: a -> Int -> BS.CStmt
+    mkInitVal x elemNum =
         BS.CSBindT
-          (BS.CPVar elemid)
+          (BS.CPVar elemId)
           Nothing
           []
-          (BS.CQType [] bsty)
-          (BS.CApply (BS.CVar (BS.mkId BS.NoPos "mkReg")) [constty ty x])
+          (BS.CQType [] bsTy)
+          (BS.CApply (BS.CVar (BS.mkId BS.NoPos "mkReg")) [constTy ty x])
       where
-        elemname = streamelemname sid elemnum
-        elemid   = BS.mkId BS.NoPos $ fromString elemname
+        elemName = streamElemName sId elemNum
+        elemId   = BS.mkId BS.NoPos $ fromString elemName
 
 -- | Make an index variable and initialise it to 0.
-mkindexdecln :: Id -> BS.CStmt
-mkindexdecln sid =
-  -- sid_idx :: Reg (Bit 64) <- mkReg 0
+mkIndexDecln :: Id -> BS.CStmt
+mkIndexDecln sId =
+  -- sId_idx :: Reg (Bit 64) <- mkReg 0
   BS.CSBindT
-    (BS.CPVar nameid)
+    (BS.CPVar nameId)
     Nothing
     []
-    (BS.CQType [] bsty)
+    (BS.CQType [] bsTy)
     (BS.CApply (BS.CVar (BS.mkId BS.NoPos "mkReg"))
                [cLit $ BS.LInt $ BS.ilDec 0])
   where
-    nameid = BS.mkId BS.NoPos $ fromString $ indexname sid
-    bsty   = tReg `BS.TAp` BS.tBitN 64 BS.NoPos
+    nameId = BS.mkId BS.NoPos $ fromString $ indexName sId
+    bsTy   = tReg `BS.TAp` BS.tBitN 64 BS.NoPos
 
 -- | Define an accessor function for the ring buffer associated with a stream
-mkaccessdecln :: Id -> Type a -> [a] -> BS.CDefl
-mkaccessdecln sid ty xs =
-    -- sid_get :: Bits 64 -> ty
-    -- sid_get x = (select sid ((sid_idx + x) % bufflength))._read
-    BS.CLValueSign (BS.CDef nameid (BS.CQType [] funty) [def]) []
+mkAccessDecln :: Id -> Type a -> [a] -> BS.CDefl
+mkAccessDecln sId ty xs =
+    -- sId_get :: Bits 64 -> ty
+    -- sId_get x = (select sId ((sId_idx + x) % buffLength))._read
+    BS.CLValueSign (BS.CDef nameId (BS.CQType [] funTy) [def]) []
   where
-    def        = BS.CClause [BS.CPVar argid] [] expr
-    argty      = BS.tBit `BS.TAp` BS.cTNum 64 BS.NoPos
-    retty      = transType ty
-    funty      = BS.tArrow `BS.TAp` argty `BS.TAp` retty
-    name       = streamaccessorname sid
-    nameid     = BS.mkId BS.NoPos $ fromString name
-    bufflength = cLit $ BS.LInt $ BS.ilDec $ toInteger $ length xs
-    argid      = BS.mkId BS.NoPos "x"
+    def        = BS.CClause [BS.CPVar argId] [] expr
+    argTy      = BS.tBit `BS.TAp` BS.cTNum 64 BS.NoPos
+    retTy      = transType ty
+    funTy      = BS.tArrow `BS.TAp` argTy `BS.TAp` retTy
+    name       = streamAccessorName sId
+    nameId     = BS.mkId BS.NoPos $ fromString name
+    buffLength = cLit $ BS.LInt $ BS.ilDec $ toInteger $ length xs
+    argId      = BS.mkId BS.NoPos "x"
     index      = BS.CApply (BS.CVar (BS.idPercentAt BS.NoPos))
                    [ BS.CApply (BS.CVar BS.idPlus)
-                       [ BS.CVar (BS.mkId BS.NoPos (fromString (indexname sid)))
-                       , BS.CVar argid
+                       [ BS.CVar (BS.mkId BS.NoPos (fromString (indexName sId)))
+                       , BS.CVar argId
                        ]
-                   , bufflength
+                   , buffLength
                    ]
-    indexexpr  = cIndexVector
-                   (BS.CVar (BS.mkId BS.NoPos (fromString (streamname sid))))
+    indexExpr  = cIndexVector
+                   (BS.CVar (BS.mkId BS.NoPos (fromString (streamName sId))))
                    index
-    expr       = BS.CSelect indexexpr (BS.id_read BS.NoPos)
+    expr       = BS.CSelect indexExpr (BS.id_read BS.NoPos)
 
 -- | Define fields for a module interface containing a specification's trigger
 -- functions and external variables.
-mkspecifcfields :: [Trigger] -> [External] -> [BS.CField]
-mkspecifcfields triggers exts =
-    map mktriggerfield triggers ++ map mkextfield exts
+mkSpecIfcFields :: [Trigger] -> [External] -> [BS.CField]
+mkSpecIfcFields triggers exts =
+    map mkTriggerField triggers ++ map mkExtField exts
   where
     -- trigger :: args_1 -> ... -> args_n -> Action
-    mktriggerfield :: Trigger -> BS.CField
-    mktriggerfield (Trigger name _ args) =
-      mkfield name $
+    mkTriggerField :: Trigger -> BS.CField
+    mkTriggerField (Trigger name _ args) =
+      mkField name $
       foldr
         (\(UExpr arg _) res -> BS.tArrow `BS.TAp` transType arg `BS.TAp` res)
         BS.tAction
         args
 
     -- ext :: Reg ty
-    mkextfield :: External -> BS.CField
-    mkextfield (External name ty) =
-      mkfield name $ tReg `BS.TAp` transType ty
+    mkExtField :: External -> BS.CField
+    mkExtField (External name ty) =
+      mkField name $ tReg `BS.TAp` transType ty
 
 -- | Define a rule for a trigger function.
-mktriggerrule :: Trigger -> BS.CRule
-mktriggerrule (Trigger name _ args) =
+mkTriggerRule :: Trigger -> BS.CRule
+mkTriggerRule (Trigger name _ args) =
     BS.CRule
       []
       (Just $ cLit $ BS.LString name)
       [ BS.CQFilter $
         BS.CVar $ BS.mkId BS.NoPos $
-        fromString $ guardname name
+        fromString $ guardName name
       ]
-      (BS.CApply nameexpr args')
+      (BS.CApply nameExpr args')
   where
-    ifcargid = BS.mkId BS.NoPos $ fromString ifcargname
-    nameid   = BS.mkId BS.NoPos $ fromString name
-    nameexpr = BS.CSelect (BS.CVar ifcargid) nameid
+    ifcArgId = BS.mkId BS.NoPos $ fromString ifcArgName
+    nameId   = BS.mkId BS.NoPos $ fromString name
+    nameExpr = BS.CSelect (BS.CVar ifcArgId) nameId
 
-    args'   = take (length args) (map argcall (argnames name))
-    argcall = BS.CVar . BS.mkId BS.NoPos . fromString
+    args'   = take (length args) (map argCall (argNames name))
+    argCall = BS.CVar . BS.mkId BS.NoPos . fromString
 
 -- | Writes the @step@ rule that updates all streams.
-mksteprule :: [Stream] -> Maybe BS.CRule
-mksteprule streams
-  | null allupdates
+mkStepRule :: [Stream] -> Maybe BS.CRule
+mkStepRule streams
+  | null allUpdates
   = -- If there is nothing to update, don't bother creating a step rule.
     -- Doing so wouldn't harm anything, but bsc will generate a warning
     -- when compiling such an empty rule.
@@ -163,61 +183,62 @@ mksteprule streams
       []
       (Just $ cLit $ BS.LString "step")
       [BS.CQFilter $ BS.CCon BS.idTrue []]
-      (BS.Caction BS.NoPos allupdates)
+      (BS.Caction BS.NoPos allUpdates)
   where
-    allupdates = bufferupdates ++ indexupdates
-    (bufferupdates, indexupdates) = unzip $ map mkupdateglobals streams
+    allUpdates = bufferUpdates ++ indexUpdates
+    (bufferUpdates, indexUpdates) = unzip $ map mkUpdateGlobals streams
 
     -- Write code to update global stream buffers and index.
-    mkupdateglobals :: Stream -> (BS.CStmt, BS.CStmt)
-    mkupdateglobals (Stream sid buff _ _) =
-        (bufferupdate, indexupdate)
+    mkUpdateGlobals :: Stream -> (BS.CStmt, BS.CStmt)
+    mkUpdateGlobals (Stream sId buff _ _) =
+        (bufferUpdate, indexUpdate)
       where
-        bufferupdate =
+        bufferUpdate =
           BS.CSExpr Nothing $
           BS.Cwrite
             BS.NoPos
-            (cIndexVector (BS.CVar buffid) (BS.CVar indexid))
-            (BS.CVar genid)
+            (cIndexVector (BS.CVar buffId) (BS.CVar indexId))
+            (BS.CVar genId)
 
-        indexupdate =
+        indexUpdate =
           BS.CSExpr Nothing $
           BS.Cwrite
             BS.NoPos
-            (BS.CVar indexid)
+            (BS.CVar indexId)
             (BS.CApply (BS.CVar (BS.idPercentAt BS.NoPos))
-                       [incindex, bufflength])
+                       [incIndex, buffLength])
+          where
+            buffLength = cLit $ BS.LInt $ BS.ilDec $ toInteger $ length buff
+            incIndex   = BS.CApply (BS.CVar BS.idPlus)
+                           [ BS.CVar indexId
+                           , cLit $ BS.LInt $ BS.ilDec 1
+                           ]
 
-        bufflength = cLit $ BS.LInt $ BS.ilDec $ toInteger $ length buff
-        incindex   = BS.CApply (BS.CVar BS.idPlus)
-                       [ BS.CVar indexid
-                       , cLit $ BS.LInt $ BS.ilDec 1
-                       ]
-
-        buffid  = BS.mkId BS.NoPos $ fromString $ streamname sid
-        genid   = BS.mkId BS.NoPos $ fromString $ generatorname sid
-        indexid = BS.mkId BS.NoPos $ fromString $ indexname sid
+        buffId  = BS.mkId BS.NoPos $ fromString $ streamName sId
+        genId   = BS.mkId BS.NoPos $ fromString $ generatorName sId
+        indexId = BS.mkId BS.NoPos $ fromString $ indexName sId
 
 -- | Write a struct declaration based on its definition.
-mkstructdecln :: Struct a => a -> BS.CDefn
-mkstructdecln x =
+mkStructDecln :: Struct a => a -> BS.CDefn
+mkStructDecln x =
     BS.Cstruct
       True
       BS.SStruct
-      (BS.IdK structid)
+      (BS.IdK structId)
       [] -- No type variables
-      structfields
+      structFields
       -- Derive a Bits instance so that we can put this struct in a Reg
       [BS.CTypeclass BS.idBits]
   where
-    structid = BS.mkId BS.NoPos $ fromString $ structname $ typename x
-    structfields = map mkstructfield $ toValues x
+    structId = BS.mkId BS.NoPos $ fromString $ structName $ typeName x
+    structFields = map mkStructField $ toValues x
 
-    mkstructfield :: Value a -> BS.CField
-    mkstructfield (Value ty field) = mkfield (fieldname field) (transType ty)
+    mkStructField :: Value a -> BS.CField
+    mkStructField (Value ty field) = mkField (fieldName field) (transType ty)
 
-mkfield :: String -> BS.CType -> BS.CField
-mkfield name ty =
+-- | Write a field of a struct or interface, along with its type.
+mkField :: String -> BS.CType -> BS.CField
+mkField name ty =
   BS.CField
     { BS.cf_name = BS.mkId BS.NoPos $ fromString name
     , BS.cf_pragmas = Nothing
@@ -226,6 +247,7 @@ mkfield name ty =
     , BS.cf_orig_type = Nothing
     }
 
+-- | The @Reg@ Bluespec interface type.
 tReg :: BS.CType
 tReg = BS.TCon $
   BS.TyCon
@@ -234,36 +256,3 @@ tReg = BS.TCon $
     , BS.tcon_sort = BS.TIstruct (BS.SInterface [])
                                  [BS.id_write BS.NoPos, BS.id_read BS.NoPos]
     }
-
--- | List all types of an expression, returns items uniquely.
--- TODO RGS: This is copy-pasted directly from copilot-c99. Factor it out somewhere?
-exprtypes :: Typeable a => Expr a -> [UType]
-exprtypes e = case e of
-  Const ty _            -> typetypes ty
-  Local ty1 ty2 _ e1 e2 -> typetypes ty1 `union` typetypes ty2
-                           `union` exprtypes e1 `union` exprtypes e2
-  Var ty _              -> typetypes ty
-  Drop ty _ _           -> typetypes ty
-  ExternVar ty _ _      -> typetypes ty
-  Op1 _ e1              -> exprtypes e1
-  Op2 _ e1 e2           -> exprtypes e1 `union` exprtypes e2
-  Op3 _ e1 e2 e3        -> exprtypes e1 `union` exprtypes e2 `union` exprtypes e3
-  Label ty _ _          -> typetypes ty
-
--- | List all types of a type, returns items uniquely.
--- TODO RGS: This is copy-pasted directly from copilot-c99. Factor it out somewhere?
-typetypes :: Typeable a => Type a -> [UType]
-typetypes ty = case ty of
-  Array ty' -> typetypes ty' `union` [UType ty]
-  Struct x  -> concatMap (\(Value ty' _) -> typetypes ty') (toValues x) `union` [UType ty]
-  _         -> [UType ty]
-
--- | Collect all expression of a list of streams and triggers and wrap them
--- into an UEXpr.
--- TODO RGS: This is copy-pasted directly from copilot-c99. Factor it out somewhere?
-gatherexprs :: [Stream] -> [Trigger] -> [UExpr]
-gatherexprs streams triggers =  map streamexpr streams
-                             ++ concatMap triggerexpr triggers
-  where
-    streamexpr  (Stream _ _ expr ty)   = UExpr ty expr
-    triggerexpr (Trigger _ guard args) = UExpr Bool guard : args

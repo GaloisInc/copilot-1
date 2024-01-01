@@ -1,5 +1,8 @@
 -- | Settings used by the code generator to customize the code.
-module Copilot.Compile.Bluespec.Settings where
+module Copilot.Compile.Bluespec.Settings
+  ( BluespecSettings(..)
+  , mkDefaultBluespecSettings
+  ) where
 
 -- | Settings used to customize the code generated.
 -- TODO RGS: Do we want other settings? For example, the ability to customize

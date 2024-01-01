@@ -53,7 +53,8 @@ library
   other-modules           : Copilot.Compile.Bluespec.CodeGen
                           , Copilot.Compile.Bluespec.Compile
                           , Copilot.Compile.Bluespec.Error
+                          , Copilot.Compile.Bluespec.Expr
                           , Copilot.Compile.Bluespec.External
+                          , Copilot.Compile.Bluespec.Name
                           , Copilot.Compile.Bluespec.Settings
-                          , Copilot.Compile.Bluespec.Translate
-                          , Copilot.Compile.Bluespec.Util
+                          , Copilot.Compile.Bluespec.Type

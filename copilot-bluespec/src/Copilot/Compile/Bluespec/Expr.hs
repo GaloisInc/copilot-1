@@ -3,30 +3,39 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Translate Copilot Core expressions and operators to Bluespec.
-module Copilot.Compile.Bluespec.Translate where
+module Copilot.Compile.Bluespec.Expr
+  ( transExpr
+  , cIndexVector
+  , cLit
+  , constTy
+  , genVector
+  ) where
 
+-- External imports
 import Data.String (IsString (..))
-
-import Copilot.Core
-import Copilot.Compile.Bluespec.Error (impossible)
-import Copilot.Compile.Bluespec.Util
-
 import qualified Language.Bluespec.Classic.AST as BS
 import qualified Language.Bluespec.Classic.AST.Builtin.Ids as BS
-import qualified Language.Bluespec.Classic.AST.Builtin.Types as BS
+
+-- Internal imports: Copilot
+import Copilot.Core
+
+-- Internal imports
+import Copilot.Compile.Bluespec.Error (impossible)
+import Copilot.Compile.Bluespec.Name
+import Copilot.Compile.Bluespec.Type
 
 -- | Translates a Copilot Core expression into a Bluespec expression.
 transExpr :: Expr a -> BS.CExpr
-transExpr (Const ty x) = constty ty x
+transExpr (Const ty x) = constTy ty x
 
 transExpr (Local ty1 _ name e1 e2) =
-  let nameid = BS.mkId BS.NoPos $ fromString name
+  let nameId = BS.mkId BS.NoPos $ fromString name
       e1'    = transExpr e1
       ty1'   = transType ty1
       e2'    = transExpr e2 in
   BS.Cletrec
     [ BS.CLValueSign
-        (BS.CDef nameid (BS.CQType [] ty1') [BS.CClause [] [] e1'])
+        (BS.CDef nameId (BS.CQType [] ty1') [BS.CClause [] [] e1'])
         []
     ]
     e2'
@@ -34,16 +43,16 @@ transExpr (Local ty1 _ name e1 e2) =
 transExpr (Var _ n) = BS.CVar $ BS.mkId BS.NoPos $ fromString n
 
 transExpr (Drop _ amount sid) =
-  let accessvar = streamaccessorname sid
+  let accessVar = streamAccessorName sid
       index     = BS.LInt $ BS.ilDec $ fromIntegral amount in
-  BS.CApply (BS.CVar $ BS.mkId BS.NoPos $ fromString accessvar)
+  BS.CApply (BS.CVar $ BS.mkId BS.NoPos $ fromString accessVar)
             [BS.CLit $ BS.CLiteral BS.NoPos index]
 
 transExpr (ExternVar _ name _) =
-  let ifcargid = BS.mkId BS.NoPos $ fromString ifcargname in
+  let ifcArgId = BS.mkId BS.NoPos $ fromString ifcArgName in
   BS.CSelect
     (BS.CSelect
-      (BS.CVar ifcargid)
+      (BS.CVar ifcArgId)
       (BS.mkId BS.NoPos $ fromString name))
     (BS.id_read BS.NoPos)
 
@@ -74,12 +83,12 @@ transOp1 op e =
     Sqrt    _ty -> BS.CSelect
                      (BS.CApply
                        (BS.CVar (BS.mkId BS.NoPos "sqrtFP"))
-                       [e, defaultRoundMode])
+                       [e, fpRM])
                      BS.idPrimFst
 
     Cast fromTy toTy -> transCast fromTy toTy e
     GetField (Struct _)  _ f -> BS.CSelect e $ BS.mkId BS.NoPos $
-                                fromString $ accessorname f
+                                fromString $ accessorName f
     GetField _ _ _ -> impossible "transOp1" "copilot-bluespec"
 
     -- Unsupported operations (see
@@ -255,7 +264,7 @@ transCast fromTy toTy =
     -- The most basic cast. Used when fromTy and toTy are both integral types
     -- with the same number of bits.
     unpackPack :: BS.CExpr -> BS.CExpr
-    unpackPack e = withTypeAnnotation $
+    unpackPack e = withTypeAnnotation toTy $
                    BS.CApply
                      (BS.CVar BS.idUnpack)
                      [BS.CApply (BS.CVar BS.idPack) [e]]
@@ -266,7 +275,7 @@ transCast fromTy toTy =
     -- Cast a Bool to a `Bits 1` value, extend it to `Bits n`, and then
     -- convert it back to an integral type.
     upcastBool :: BS.CExpr -> BS.CExpr
-    upcastBool e = withTypeAnnotation $
+    upcastBool e = withTypeAnnotation toTy $
                    BS.CApply
                      (BS.CVar BS.idUnpack)
                      [BS.CApply extendExpr [BS.CApply (BS.CVar BS.idPack) [e]]]
@@ -280,7 +289,7 @@ transCast fromTy toTy =
     -- zero-extension depending on whether `x m` (i.e., fromTy) is a signed
     -- or unsigned type, respectively.
     upcast :: BS.CExpr -> BS.CExpr
-    upcast e = withTypeAnnotation $ BS.CApply extendExpr [e]
+    upcast e = withTypeAnnotation toTy $ BS.CApply extendExpr [e]
 
     -- downcast :: (BitExtend m n x) => x n -> x m
     -- downcast e = (truncate e) :: ty
@@ -289,13 +298,13 @@ transCast fromTy toTy =
     -- `UInt 64` to `UInt 8` or `Int 64` to `Int 8`) by truncating the most
     -- significant bits.
     downcast :: BS.CExpr -> BS.CExpr
-    downcast e = withTypeAnnotation $ BS.CApply truncateExpr [e]
+    downcast e = withTypeAnnotation toTy $ BS.CApply truncateExpr [e]
 
     -- Apply upcast followed by unpackPack. This requires supplying the type to
     -- upcast to for type disambiguation purposes.
     unpackPackUpcast :: Type a -> BS.CExpr -> BS.CExpr
     unpackPackUpcast upcastTy e = unpackPack $
-      BS.CApply extendExpr [e] `BS.CHasType` BS.CQType [] (transType upcastTy)
+      withTypeAnnotation upcastTy $ BS.CApply extendExpr [e]
 
     -- castIntegralToFloatingPoint :: (FixedFloatCVT fromTy toTy) => fromTy toTy
     -- castIntegralToFloatingPoint e =
@@ -308,28 +317,23 @@ transCast fromTy toTy =
     -- special-purpose FixedFloatCVT class for this task.
     castIntegralToFloatingPoint :: BS.CExpr -> BS.CExpr
     castIntegralToFloatingPoint e =
-      withTypeAnnotation $
+      withTypeAnnotation toTy $
       BS.CSelect
         (BS.CApply
           (BS.CVar (BS.mkId BS.NoPos "vFixedToFloat"))
           [ e
           , constNumTy Word64 0
-          , defaultRoundMode
+          , fpRM
           ])
         BS.idPrimFst
-
-    -- It is sometimes possible to have ambiguous types unless we give explicit
-    -- type signatures to various expressions.
-    withTypeAnnotation :: BS.CExpr -> BS.CExpr
-    withTypeAnnotation e = e `BS.CHasType` BS.CQType [] (transType toTy)
 
     extendExpr   = BS.CVar $ BS.mkId BS.NoPos "extend"
     truncateExpr = BS.CVar $ BS.mkId BS.NoPos "truncate"
 
 -- | Transform a Copilot Core literal, based on its value and type, into a
 -- Bluespec expression.
-constty :: Type a -> a -> BS.CExpr
-constty ty =
+constTy :: Type a -> a -> BS.CExpr
+constTy ty =
   case ty of
     -- The treatment of scalar types is relatively straightforward. Note that
     -- Bool is an enum, so we must construct it using a CCon rather than with
@@ -355,7 +359,7 @@ constty ty =
     -- We use the `update` function instead of the := syntax (e.g.,
     -- { array_temp[0] := x; array_temp[1] := y; ...}) so that we can construct
     -- a Vector in a pure context.
-    Array ty' -> constVector ty' . arrayelems
+    Array ty' -> constVector ty' . arrayElems
 
     -- Converting a Copilot struct { field_0 = x_0, ..., field_(n-1) = x_(n-1) }
     -- to a Bluespec struct is quite straightforward, given Bluespec's struct
@@ -363,16 +367,22 @@ constty ty =
     Struct s -> \v ->
       BS.CStruct
         (Just True)
-        (BS.mkId BS.NoPos $ fromString $ structname $ typename s)
+        (BS.mkId BS.NoPos $ fromString $ structName $ typeName s)
         (map (\(Value ty'' field@(Field val)) ->
-               ( BS.mkId BS.NoPos $ fromString $ fieldname field
-               , constty ty'' val
+               ( BS.mkId BS.NoPos $ fromString $ fieldName field
+               , constTy ty'' val
                ))
              (toValues v))
 
+-- | Transform a list of Copilot Core expressions of a given 'Type' into a
+-- Bluespec @Vector@ expression.
 constVector :: Type a -> [a] -> BS.CExpr
-constVector ty = genVector (\_ -> constty ty)
+constVector ty = genVector (\_ -> constTy ty)
 
+-- | Transform a list of Copilot Core expressions into a Bluespec @Vector@
+-- expression. When invoking @genVector f es@, where @es@ has length @n@, the
+-- resulting @Vector@ will consist of
+-- @[f 0 (es !! 0), f 1 (es !! 1), ..., f (n-1) (es !! (n-1))]@.
 genVector :: (Int -> a -> BS.CExpr) -> [a] -> BS.CExpr
 genVector f vec =
   snd $
@@ -389,52 +399,7 @@ genVector f vec =
     (0, BS.CVar (BS.mkId BS.NoPos "newVector"))
     vec
 
--- | Translate a Copilot type to a Bluespec type.
-transType :: Type a -> BS.CType
-transType ty = case ty of
-  Bool   -> BS.tBool
-  Int8   -> BS.tInt  `BS.TAp` BS.cTNum  8 BS.NoPos
-  Int16  -> BS.tInt  `BS.TAp` BS.cTNum 16 BS.NoPos
-  Int32  -> BS.tInt  `BS.TAp` BS.cTNum 32 BS.NoPos
-  Int64  -> BS.tInt  `BS.TAp` BS.cTNum 64 BS.NoPos
-  Word8  -> BS.tUInt `BS.TAp` BS.cTNum  8 BS.NoPos
-  Word16 -> BS.tUInt `BS.TAp` BS.cTNum 16 BS.NoPos
-  Word32 -> BS.tUInt `BS.TAp` BS.cTNum 32 BS.NoPos
-  Word64 -> BS.tUInt `BS.TAp` BS.cTNum 64 BS.NoPos
-
-  Float -> BS.TCon $
-    BS.TyCon
-      { BS.tcon_name = BS.mkId BS.NoPos "Float"
-      , BS.tcon_kind = Just BS.KStar
-      , BS.tcon_sort = BS.TItype 0 $ tFloatingPoint `BS.TAp`
-                                     BS.cTNum  8 BS.NoPos `BS.TAp`
-                                     BS.cTNum 23 BS.NoPos
-      }
-  Double -> BS.TCon $
-    BS.TyCon
-      { BS.tcon_name = BS.mkId BS.NoPos "Double"
-      , BS.tcon_kind = Just BS.KStar
-      , BS.tcon_sort = BS.TItype 0 $ tFloatingPoint `BS.TAp`
-                                     BS.cTNum 11 BS.NoPos `BS.TAp`
-                                     BS.cTNum 52 BS.NoPos
-      }
-  Array ty' -> tVector `BS.TAp` BS.cTNum len BS.NoPos `BS.TAp` transType ty'
-    where
-      len = toInteger $ tylength ty
-  Struct s -> BS.TCon $
-    BS.TyCon
-      { BS.tcon_name = BS.mkId BS.NoPos $ fromString $ structname $ typename s
-      , BS.tcon_kind = Just BS.KStar
-      , BS.tcon_sort =
-          BS.TIstruct BS.SStruct $
-          map (\(Value _tu field) ->
-                BS.mkId BS.NoPos $
-                fromString $
-                fieldname field)
-              (toValues s)
-      }
-
--- Translate a literal number of type @ty@ into a Bluespec expression.
+-- | Translate a literal number of type @ty@ into a Bluespec expression.
 --
 -- PRE: The type of PRE is numeric (integer or floating-point), that
 -- is, not boolean, struct or array.
@@ -445,76 +410,55 @@ constNumTy ty =
     Double -> constFP ty . fromInteger
     _      -> constInt ty
 
--- Translate a Copilot integer literal into a Bluespec expression.
+-- | Translate a Copilot integer literal into a Bluespec expression.
 constInt :: Type a -> Integer -> BS.CExpr
 constInt ty i
     -- Bluespec intentionally does not support negative literal syntax (e.g.,
     -- -42), so we must create negative integer literals using the `negate`
     -- function.
-    | i >= 0    = withTypeAnnotation $ cLit $ BS.LInt $ BS.ilDec i
-    | otherwise = withTypeAnnotation $
+    | i >= 0    = withTypeAnnotation ty $ cLit $ BS.LInt $ BS.ilDec i
+    | otherwise = withTypeAnnotation ty $
                   BS.CApply
                     (BS.CVar $ BS.idNegateAt BS.NoPos)
                     [cLit $ BS.LInt $ BS.ilDec $ negate i]
-  where
-    -- It is sometimes possible to have ambiguous types unless we give explicit
-    -- type signatures to various expressions.
-    withTypeAnnotation :: BS.CExpr -> BS.CExpr
-    withTypeAnnotation e = e `BS.CHasType` BS.CQType [] (transType ty)
 
--- Translate a Copilot floating-point literal into a Bluespec expression.
+-- | Translate a Copilot floating-point literal into a Bluespec expression.
 constFP :: Type ty -> Double -> BS.CExpr
 constFP ty d
     -- Bluespec intentionally does not support negative literal syntax (e.g.,
     -- -42.5), so we must create negative floating-point literals using the
     -- `negate` function.
-    | d >= 0    = withTypeAnnotation $ cLit $ BS.LReal d
-    | otherwise = withTypeAnnotation $
+    | d >= 0    = withTypeAnnotation ty $ cLit $ BS.LReal d
+    | otherwise = withTypeAnnotation ty $
                   BS.CApply
                     (BS.CVar $ BS.idNegateAt BS.NoPos)
                     [cLit $ BS.LReal $ negate d]
-  where
-    -- It is sometimes possible to have ambiguous types unless we give explicit
-    -- type signatures to various expressions.
-    withTypeAnnotation :: BS.CExpr -> BS.CExpr
-    withTypeAnnotation e = e `BS.CHasType` BS.CQType [] (transType ty)
 
+-- | Create a Bluespec expression consisting of a literal.
 cLit :: BS.Literal -> BS.CExpr
 cLit = BS.CLit . BS.CLiteral BS.NoPos
 
+-- | Create a Bluespec expression that indexes into a @Vector@.
 cIndexVector :: BS.CExpr -> BS.CExpr -> BS.CExpr
 cIndexVector vec idx =
   BS.CApply (BS.CVar (BS.mkId BS.NoPos "select")) [vec, idx]
 
-tVector :: BS.CType
-tVector = BS.TCon $
-  BS.TyCon
-    { BS.tcon_name = BS.idVector
-    , BS.tcon_kind = Just (BS.Kfun BS.KNum (BS.Kfun BS.KStar BS.KStar))
-    , BS.tcon_sort =
-        BS.TIdata
-          { BS.tidata_cons = [BS.mkId BS.NoPos "V"]
-          , BS.tidata_enum = False
-          }
-    }
+-- | Explicitly annotate an expression with a type signature. This is necessary
+-- to prevent expressions from having ambiguous types in certain situations.
+withTypeAnnotation :: Type a -> BS.CExpr -> BS.CExpr
+withTypeAnnotation ty e = e `BS.CHasType` BS.CQType [] (transType ty)
 
-tFloatingPoint :: BS.CType
-tFloatingPoint = BS.TCon $
-  BS.TyCon
-    { BS.tcon_name = BS.mkId BS.NoPos "FloatingPoint"
-    , BS.tcon_kind = Just (BS.Kfun BS.KNum (BS.Kfun BS.KNum BS.KStar))
-    , BS.tcon_sort =
-        BS.TIstruct BS.SStruct [ BS.mkId BS.NoPos "sign"
-                               , BS.mkId BS.NoPos "exp"
-                               , BS.mkId BS.NoPos "sfd"
-                               ]
-    }
-
+-- | Throw an error if attempting to use a floating-point operation that
+-- Bluespec does not currently support.
+--
 -- TODO RGS: Ask Ivan about the best way to handle this
 unsupportedFPOp :: String -> a
 unsupportedFPOp op =
   error $ "Bluespec's FloatingPoint type does not support the " ++ op ++
           " operation."
 
-defaultRoundMode :: BS.CExpr
-defaultRoundMode = BS.CCon (BS.mkId BS.NoPos "Rnd_Nearest_Even") []
+-- | We assume round-near-even throughout, but this variable can be changed if
+-- needed. This matches the behavior of @fpRM@ in @copilot-theorem@'s
+-- @Copilot.Theorem.What4.Translate@ module.
+fpRM :: BS.CExpr
+fpRM = BS.CCon (BS.mkId BS.NoPos "Rnd_Nearest_Even") []

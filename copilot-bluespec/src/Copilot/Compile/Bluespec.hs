@@ -6,5 +6,7 @@ module Copilot.Compile.Bluespec
   , mkDefaultBluespecSettings
   ) where
 
-import Copilot.Compile.Bluespec.Compile
-import Copilot.Compile.Bluespec.Settings
+-- Internal imports
+import Copilot.Compile.Bluespec.Compile ( compile, compileWith )
+import Copilot.Compile.Bluespec.Settings ( BluespecSettings (..),
+                                           mkDefaultBluespecSettings )

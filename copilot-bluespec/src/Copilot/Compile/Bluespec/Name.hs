@@ -1,67 +1,75 @@
--- | Auxiliary helper functions to generate Bluespec code.
-module Copilot.Compile.Bluespec.Util where
+-- | Naming of variables and functions in Bluespec.
+module Copilot.Compile.Bluespec.Name
+  ( argNames
+  , generatorName
+  , guardName
+  , ifcArgName
+  , indexName
+  , specIfcName
+  , specTypesName
+  , streamAccessorName
+  , streamElemName
+  , streamName
+  , structName
+  ) where
 
+-- External imports: Copilot
 import Copilot.Core (Id)
 
 -- | Turn a specification name into the name of its module interface.
-specinterfacename :: String -> String
-specinterfacename prefix = prefix ++ "Ifc"
+specIfcName :: String -> String
+specIfcName prefix = prefix ++ "Ifc"
 
 -- | Turn a specification name into the name of the module that declares its
 -- struct types.
-spectypesname :: String -> String
-spectypesname prefix = prefix ++ "Types"
+specTypesName :: String -> String
+specTypesName prefix = prefix ++ "Types"
+
+-- | Turn a stream id into a stream element name.
+streamElemName :: Id -> Int -> String
+streamElemName sId n = streamName sId ++ "_" ++ show n
 
 -- | The name of the variable of type @<prefix>Ifc@. This is used to select
 -- trigger functions and external variables.
-ifcargname :: String
-ifcargname = "ifc"
+ifcArgName :: String
+ifcArgName = "ifc"
 
 -- | Turn a Copilot struct name into the name of a Bluespec struct by prepending
 -- the @BS_@ prefix (short for \"Bluespec\") at the front. This is done because
 -- Bluespec requires all struct definitions to begin with an uppercase letter,
 -- so prepending a prefix ensures that this requirement is meant while
 -- regardless of how the original Copilot struct name is capitalized.
-structname :: String -> String
-structname n = "BS_" ++ n
+structName :: String -> String
+structName n = "BS_" ++ n
 
 -----
 -- TODO RGS: Everything below is copy-pasted directly from copilot-c99. Factor it out somewhere?
 -----
 
 -- | Turn a stream id into a suitable Bluespec variable name.
-streamname :: Id -> String
-streamname sid = "s" ++ show sid
-
--- | Turn a stream id into a stream element name.
-streamelemname :: Id -> Int -> String
-streamelemname sid n = streamname sid ++ "_" ++ show n
+streamName :: Id -> String
+streamName sId = "s" ++ show sId
 
 -- | Turn a stream id into the global varname for indices.
-indexname :: Id -> String
-indexname sid = streamname sid ++ "_idx"
+indexName :: Id -> String
+indexName sId = streamName sId ++ "_idx"
 
 -- | Turn a stream id into the name of its accessor function
-streamaccessorname :: Id -> String
-streamaccessorname sid = streamname sid ++ "_get"
+streamAccessorName :: Id -> String
+streamAccessorName sId = streamName sId ++ "_get"
 
 -- | Turn stream id into name of its generator function.
-generatorname :: Id -> String
-generatorname sid = streamname sid ++ "_gen"
+generatorName :: Id -> String
+generatorName sId = streamName sId ++ "_gen"
 
 -- | Turn the name of a trigger into a guard generator.
-guardname :: String -> String
-guardname name = name ++ "_guard"
+guardName :: String -> String
+guardName name = name ++ "_guard"
 
 -- | Turn a trigger name into a an trigger argument name.
-argname :: String -> Int -> String
-argname name n = name ++ "_arg" ++ show n
-
--- | Turn a handler function name into a name for a temporary variable for a
--- handler argument.
-argTempName :: String -> Int -> String
-argTempName name n = name ++ "_arg_temp" ++ show n
+argName :: String -> Int -> String
+argName name n = name ++ "_arg" ++ show n
 
 -- | Enumerate all argument names based on trigger name.
-argnames :: String -> [String]
-argnames base = map (argname base) [0..]
+argNames :: String -> [String]
+argNames base = map (argName base) [0..]

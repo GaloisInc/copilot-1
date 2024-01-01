@@ -1,11 +1,17 @@
 {-# LANGUAGE ExistentialQuantification #-}
+
 -- | Represent information about externs needed in the generation of Bluespec
 -- code for stream declarations and triggers.
-module Copilot.Compile.Bluespec.External where
+module Copilot.Compile.Bluespec.External
+  ( External(..)
+  , gatherExts
+  ) where
 
+-- External imports
 import Data.List (unionBy)
 
-import Copilot.Core
+-- Internal imports: Copilot
+import Copilot.Core ( Expr (..), Stream (..), Trigger (..), Type, UExpr (..) )
 
 -----
 -- TODO RGS: Almost everything here is copy-pasted directly from copilot-c99.
@@ -15,43 +21,43 @@ import Copilot.Core
 
 -- | Representation of external variables.
 data External = forall a. External
-  { extname :: String
-  , exttype :: Type a
+  { extName :: String
+  , extType :: Type a
   }
-
--- | Union over lists of External, we solely base the equality on the
--- extname's.
-extunion :: [External] -> [External] -> [External]
-extunion = unionBy (\a b -> extname a == extname b)
 
 -- | Collect all external variables from the streams and triggers.
 --
 -- Although Copilot specifications can contain also properties and theorems,
--- the Bluespec backend currently only generates code for streams and triggers.
-gatherexts :: [Stream] -> [Trigger] -> [External]
-gatherexts streams triggers = streamsexts `extunion` triggersexts
+-- the C99 backend currently only generates code for streams and triggers.
+gatherExts :: [Stream] -> [Trigger] -> [External]
+gatherExts streams triggers = streamsExts `extUnion` triggersExts
   where
-    streamsexts  = foldr extunion mempty $ map streamexts streams
-    triggersexts = foldr extunion mempty $ map triggerexts triggers
+    streamsExts  = foldr (extUnion . streamExts) mempty streams
+    triggersExts = foldr (extUnion . triggerExts) mempty triggers
 
-    streamexts :: Stream -> [External]
-    streamexts (Stream _ _ expr _) = exprexts expr
+    streamExts :: Stream -> [External]
+    streamExts (Stream _ _ expr _) = exprExts expr
 
-    triggerexts :: Trigger -> [External]
-    triggerexts (Trigger _ guard args) = guardexts `extunion` argexts
+    triggerExts :: Trigger -> [External]
+    triggerExts (Trigger _ guard args) = guardExts `extUnion` argExts
       where
-        guardexts = exprexts guard
-        argexts   = concat $ map uexprexts args
+        guardExts = exprExts guard
+        argExts   = concatMap uExprExts args
 
-    uexprexts :: UExpr -> [External]
-    uexprexts (UExpr _ expr) = exprexts expr
+    uExprExts :: UExpr -> [External]
+    uExprExts (UExpr _ expr) = exprExts expr
 
-    exprexts :: Expr a -> [External]
-    exprexts expr = let rec = exprexts in case expr of
-      Local _ _ _ e1 e2   -> rec e1 `extunion` rec e2
-      ExternVar ty name _ -> [External name ty]
-      Op1 _ e             -> rec e
-      Op2 _ e1 e2         -> rec e1 `extunion` rec e2
-      Op3 _ e1 e2 e3      -> rec e1 `extunion` rec e2 `extunion` rec e3
-      Label _ _ e         -> rec e
-      _                   -> []
+    exprExts :: Expr a -> [External]
+    exprExts (Local _ _ _ e1 e2)   = exprExts e1 `extUnion` exprExts e2
+    exprExts (ExternVar ty name _) = [External name ty]
+    exprExts (Op1 _ e)             = exprExts e
+    exprExts (Op2 _ e1 e2)         = exprExts e1 `extUnion` exprExts e2
+    exprExts (Op3 _ e1 e2 e3)      = exprExts e1 `extUnion` exprExts e2
+                                       `extUnion` exprExts e3
+    exprExts (Label _ _ e)         = exprExts e
+    exprExts _                     = []
+
+    -- | Union over lists of External, we solely base the equality on the
+    -- extName's.
+    extUnion :: [External] -> [External] -> [External]
+    extUnion = unionBy (\a b -> extName a == extName b)

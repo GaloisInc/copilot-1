@@ -1,3 +1,4 @@
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Compile Copilot specifications to Bluespec code.
@@ -6,30 +7,35 @@ module Copilot.Compile.Bluespec.Compile
   , compileWith
   ) where
 
-import Data.List                      (nub)
+-- External imports
+import Data.List                      (nub, union)
 import Data.Maybe                     (catMaybes, maybeToList)
 import Data.String                    (IsString (..))
+import Data.Typeable                  (Typeable)
+import qualified Language.Bluespec.Classic.AST as BS
+import qualified Language.Bluespec.Classic.AST.Builtin.Ids as BS
+import qualified Language.Bluespec.Classic.AST.Builtin.Types as BS
 import Text.PrettyPrint.HughesPJClass (Pretty (..), render)
 import System.Directory               (createDirectoryIfMissing)
 import System.Exit                    (exitFailure)
 import System.FilePath                ((</>))
 import System.IO                      (hPutStrLn, stderr)
 
+-- Internal imports: Copilot
 import Copilot.Core
+
+-- Internal imports
 import Copilot.Compile.Bluespec.CodeGen
 import Copilot.Compile.Bluespec.External
+import Copilot.Compile.Bluespec.Name
 import Copilot.Compile.Bluespec.Settings
-import Copilot.Compile.Bluespec.Util
-
-import qualified Language.Bluespec.Classic.AST as BS
-import qualified Language.Bluespec.Classic.AST.Builtin.Ids as BS
-import qualified Language.Bluespec.Classic.AST.Builtin.Types as BS
 
 -- | Compile a specification to a Bluespec file.
 --
--- The first argument is the settings for the bluespec code generated.
+-- The first argument is the settings for the Bluespec code generated.
 --
--- The second argument is used as module name and prefix file generated.
+-- The second argument is used as a module name and the prefix for the .bs files
+-- that are generated.
 compileWith :: BluespecSettings -> String -> Spec -> IO ()
 compileWith bsSettings prefix spec
   | null (specTriggers spec)
@@ -45,8 +51,8 @@ compileWith bsSettings prefix spec
 
        let dir = bluespecSettingsOutputDirectory bsSettings
        createDirectoryIfMissing True dir
-       writeFile (dir </> spectypesname prefix ++ ".bs") typesBsFile
-       writeFile (dir </> specinterfacename prefix ++ ".bs") ifcBsFile
+       writeFile (dir </> specTypesName prefix ++ ".bs") typesBsFile
+       writeFile (dir </> specIfcName prefix ++ ".bs") ifcBsFile
        writeFile (dir </> prefix ++ ".bs") bsFile
 
 -- | Compile a specification to a Bluespec.
@@ -97,9 +103,9 @@ compileBS _bsSettings prefix spec =
     genImports :: [BS.CImport]
     genImports =
       [ BS.CImpId False $ BS.mkId BS.NoPos $ fromString
-                        $ spectypesname prefix
+                        $ specTypesName prefix
       , BS.CImpId False $ BS.mkId BS.NoPos $ fromString
-                        $ specinterfacename prefix
+                        $ specIfcName prefix
       ]
 
     moduleDef :: BS.CDefn
@@ -110,72 +116,71 @@ compileBS _bsSettings prefix spec =
         (BS.CQType
           []
           (BS.tArrow
-            `BS.TAp` (BS.tModule `BS.TAp` ifcty)
-            `BS.TAp` (BS.tModule `BS.TAp` emptyty)))
-        [ BS.CClause [BS.CPVar ifcmodid] [] $
+            `BS.TAp` (BS.tModule `BS.TAp` ifcTy)
+            `BS.TAp` (BS.tModule `BS.TAp` emptyTy)))
+        [ BS.CClause [BS.CPVar ifcModId] [] $
           BS.Cmodule BS.NoPos $
               BS.CMStmt
-                (BS.CSBind (BS.CPVar ifcargid) Nothing [] (BS.CVar ifcmodid))
-            : map BS.CMStmt mkglobals ++
-            [ BS.CMStmt $ BS.CSletrec genfuns
+                (BS.CSBind (BS.CPVar ifcArgId) Nothing [] (BS.CVar ifcModId))
+            : map BS.CMStmt mkGlobals ++
+            [ BS.CMStmt $ BS.CSletrec genFuns
             , BS.CMrules $ BS.Crules [] rules
             ]
         ]
 
-    ifcargid = BS.mkId BS.NoPos $ fromString ifcargname
-    ifcmodid = BS.mkId BS.NoPos "ifcMod"
+    ifcArgId = BS.mkId BS.NoPos $ fromString ifcArgName
+    ifcModId = BS.mkId BS.NoPos "ifcMod"
 
     rules :: [BS.CRule]
-    rules = map mktriggerrule triggers ++ maybeToList (mksteprule streams)
+    rules = map mkTriggerRule triggers ++ maybeToList (mkStepRule streams)
 
     streams  = specStreams spec
     triggers = specTriggers spec
-    exts     = gatherexts streams triggers
+    exts     = gatherExts streams triggers
 
-    ifcid     = BS.mkId BS.NoPos $ fromString $ specinterfacename prefix
-    ifcfields = mkspecifcfields triggers exts
-    ifcty     = BS.TCon (BS.TyCon
-                  { BS.tcon_name = ifcid
+    ifcId     = BS.mkId BS.NoPos $ fromString $ specIfcName prefix
+    ifcFields = mkSpecIfcFields triggers exts
+    ifcTy     = BS.TCon (BS.TyCon
+                  { BS.tcon_name = ifcId
                   , BS.tcon_kind = Just BS.KStar
                   , BS.tcon_sort = BS.TIstruct
                                      (BS.SInterface [])
-                                     (map BS.cf_name ifcfields)
+                                     (map BS.cf_name ifcFields)
                   })
 
-    emptyty = BS.TCon (BS.TyCon
+    emptyTy = BS.TCon (BS.TyCon
                 { BS.tcon_name = BS.idEmpty
                 , BS.tcon_kind = Just BS.KStar
                 , BS.tcon_sort = BS.TIstruct (BS.SInterface []) []
                 })
 
     -- Make buffer and index declarations for streams.
-    mkglobals :: [BS.CStmt]
-    mkglobals = concatMap buffdecln streams ++ map indexdecln streams
+    mkGlobals :: [BS.CStmt]
+    mkGlobals = concatMap buffDecln streams ++ map indexDecln streams
       where
-        buffdecln  (Stream sid buff _ ty) = mkbuffdecln  sid ty buff
-        indexdecln (Stream sid _    _ _ ) = mkindexdecln sid
+        buffDecln  (Stream sId buff _ ty) = mkBuffDecln  sId ty buff
+        indexDecln (Stream sId _    _ _ ) = mkIndexDecln sId
 
     -- Make generator functions, including trigger arguments.
-    genfuns :: [BS.CDefl]
-    genfuns =  map accessdecln streams
-            ++ map streamgen streams
-            ++ concatMap triggergen triggers
+    genFuns :: [BS.CDefl]
+    genFuns =  map accessDecln streams
+            ++ map streamGen streams
+            ++ concatMap triggerGen triggers
       where
+        accessDecln :: Stream -> BS.CDefl
+        accessDecln (Stream sId buff _ ty) = mkAccessDecln sId ty buff
 
-        accessdecln :: Stream -> BS.CDefl
-        accessdecln (Stream sid buff _ ty) = mkaccessdecln sid ty buff
+        streamGen :: Stream -> BS.CDefl
+        streamGen (Stream sId _ expr ty) = mkGenFun (generatorName sId) expr ty
 
-        streamgen :: Stream -> BS.CDefl
-        streamgen (Stream sid _ expr ty) = genfun (generatorname sid) expr ty
-
-        triggergen :: Trigger -> [BS.CDefl]
-        triggergen (Trigger name guard args) = guarddef : argdefs
+        triggerGen :: Trigger -> [BS.CDefl]
+        triggerGen (Trigger name guard args) = guardDef : argDefs
           where
-            guarddef = genfun (guardname name) guard Bool
-            argdefs  = map arggen (zip (argnames name) args)
+            guardDef = mkGenFun (guardName name) guard Bool
+            argDefs  = map argGen (zip (argNames name) args)
 
-            arggen :: (String, UExpr) -> BS.CDefl
-            arggen (argName, UExpr ty expr) = genfun argName expr ty
+            argGen :: (String, UExpr) -> BS.CDefl
+            argGen (argName, UExpr ty expr) = mkGenFun argName expr ty
 
 -- | Generate a @<prefix>Ifc.bs@ file from a 'Spec'. This contains the
 -- definition of the @<prefix>Ifc@ interface, which declares the types of all
@@ -184,7 +189,7 @@ compileBS _bsSettings prefix spec =
 compileIfcBS :: BluespecSettings -> String -> Spec -> BS.CPackage
 compileIfcBS _bsSettings prefix spec =
     BS.CPackage
-      ifcid
+      ifcId
       (Right [])
       (stdLibImports ++ genImports)
       []
@@ -195,23 +200,23 @@ compileIfcBS _bsSettings prefix spec =
     genImports :: [BS.CImport]
     genImports =
       [ BS.CImpId False $ BS.mkId BS.NoPos $ fromString
-                        $ spectypesname prefix
+                        $ specTypesName prefix
       ]
 
-    ifcid     = BS.mkId BS.NoPos $ fromString $ specinterfacename prefix
-    ifcfields = mkspecifcfields triggers exts
+    ifcId     = BS.mkId BS.NoPos $ fromString $ specIfcName prefix
+    ifcFields = mkSpecIfcFields triggers exts
 
     streams  = specStreams spec
     triggers = specTriggers spec
-    exts     = gatherexts streams triggers
+    exts     = gatherExts streams triggers
 
     ifcDef :: BS.CDefn
     ifcDef = BS.Cstruct
                True
                (BS.SInterface [])
-               (BS.IdK ifcid)
+               (BS.IdK ifcId)
                [] -- No type variables
-               ifcfields
+               ifcFields
                [] -- No derived instances
 
 -- | Generate a @<prefix>Types.bs@ file from a 'Spec'. This declares the types
@@ -221,18 +226,18 @@ compileIfcBS _bsSettings prefix spec =
 compileTypesBS :: BluespecSettings -> String -> Spec -> BS.CPackage
 compileTypesBS _bsSettings prefix spec =
     BS.CPackage
-      typesid
+      typesId
       (Right [])
       stdLibImports
       []
       structDefs
       []
   where
-    typesid = BS.mkId BS.NoPos $ fromString $ spectypesname prefix
+    typesId = BS.mkId BS.NoPos $ fromString $ specTypesName prefix
 
     structDefs = mkTypeDeclns exprs
 
-    exprs    = gatherexprs streams triggers
+    exprs    = gatherExprs streams triggers
     streams  = specStreams spec
     triggers = specTriggers spec
 
@@ -240,10 +245,10 @@ compileTypesBS _bsSettings prefix spec =
     mkTypeDeclns :: [UExpr] -> [BS.CDefn]
     mkTypeDeclns es = catMaybes $ map mkTypeDecln uTypes
       where
-        uTypes = nub $ concatMap (\(UExpr _ e) -> exprtypes e) es
+        uTypes = nub $ concatMap (\(UExpr _ e) -> exprTypes e) es
 
         mkTypeDecln (UType ty) = case ty of
-          Struct x -> Just $ mkstructdecln x
+          Struct x -> Just $ mkStructDecln x
           _        -> Nothing
 
 -- | Imports from the Bluespec standard library.
@@ -252,3 +257,38 @@ stdLibImports =
   [ BS.CImpId False $ BS.mkId BS.NoPos "FloatingPoint"
   , BS.CImpId False $ BS.mkId BS.NoPos "Vector"
   ]
+
+-- ** Obtain information from Copilot Core Exprs and Types.
+-- TODO RGS: All the code below is copy-pasted directly from copilot-c99. Factor it out somewhere?
+
+-- | List all types of an expression, returns items uniquely.
+exprTypes :: Typeable a => Expr a -> [UType]
+exprTypes e = case e of
+  Const ty _            -> typeTypes ty
+  Local ty1 ty2 _ e1 e2 -> typeTypes ty1 `union` typeTypes ty2
+                             `union` exprTypes e1 `union` exprTypes e2
+  Var ty _              -> typeTypes ty
+  Drop ty _ _           -> typeTypes ty
+  ExternVar ty _ _      -> typeTypes ty
+  Op1 _ e1              -> exprTypes e1
+  Op2 _ e1 e2           -> exprTypes e1 `union` exprTypes e2
+  Op3 _ e1 e2 e3        -> exprTypes e1 `union` exprTypes e2
+                             `union` exprTypes e3
+  Label ty _ _          -> typeTypes ty
+
+-- | List all types of a type, returns items uniquely.
+typeTypes :: Typeable a => Type a -> [UType]
+typeTypes ty = case ty of
+  Array ty' -> typeTypes ty' `union` [UType ty]
+  Struct x  -> concatMap (\(Value ty' _) -> typeTypes ty') (toValues x)
+                 `union` [UType ty]
+  _         -> [UType ty]
+
+-- | Collect all expression of a list of streams and triggers and wrap them
+-- into an UEXpr.
+gatherExprs :: [Stream] -> [Trigger] -> [UExpr]
+gatherExprs streams triggers =  map streamUExpr streams
+                             ++ concatMap triggerUExpr triggers
+  where
+    streamUExpr  (Stream _ _ expr ty)   = UExpr ty expr
+    triggerUExpr (Trigger _ guard args) = UExpr Bool guard : args

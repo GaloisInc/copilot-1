@@ -60,7 +60,7 @@ main = do
   compile "Fibs" spec'
 ```
 
-Note that the only parts of this program that are `copilot-bluespec` specific
+Note that the only parts of this program that are `copilot-bluespec`–specific
 are:
 
 1. The `import Copilot.Compile.Bluespec` statement, and
@@ -201,11 +201,12 @@ only 9 messages are printed.
 ## Streams
 
 Much like in `copilot-c99`, `copilot-bluespec` translates each stream
-declaration into a ring buffer. More concretely, it translates a Stream into a
-`Vector n (Reg t)`, where `n` is the minimum number of elements needed to later
-values in the stream and `t` is the stream's element type. `Reg` is a register,
-which stores a value that can be read from and written to. As time advances, we
-will update the `Reg`s in the ring buffer with later values in the stream.
+declaration into a ring buffer. More concretely, it translates a `Stream` into
+a `Vector n (Reg t)`, where `n` is the minimum number of elements needed to
+computer later values in the stream, and `t` is the stream's element type.
+`Reg` is a register, which stores a value that can be read from and written to.
+As time advances, we will update the `Reg`s in the ring buffer with later
+values in the stream.
 
 The `Fibs.bs` example above contains exactly one stream, which is created at
 the top of the `mkFibs` function:

@@ -67,71 +67,106 @@ are:
 2. The call to `compile "Fibs" spec'` in `main`. This will compile the Copilot
    specification to a Bluespec program named `Fibs.bs`.
 
-Running this program will generate `Fibs.bs`, whose contents will look roughly
-like the following:
+Running this program will generate three files[^1]:
 
-TODO RGS: Update the code below once the codegen is finalized
+[^1]: The actual code in these files is machine-generated and somewhat
+difficult to read. We have cleaned up the code slightly to make it easier to
+understand.
 
-```bluespec
-package Fibs where
+* `FibsTypes.bs`: If the Copilot specification contains any structs, then this
+  file will contain the corresponding Bluespec struct definitions. The
+  specification does not contain any structs, so this file is mostly empty:
 
-import Vector
+  ```bluespec
+  package FibsTypes where
 
-interface FibsIfc =
-  even :: UInt 32 -> Action
-  odd :: UInt 32 -> Action
+  import FloatingPoint
+  import Vector
+  ```
 
-mkFibs :: Module FibsIfc -> Module Empty
-mkFibs ifcMod =
-  module
-    ifc <- ifcMod
+  Later in this document, we will see a different example that makes use of
+  structs.
 
-    s0_0 :: Reg (UInt 32) <- mkReg 1
-    s0_1 :: Reg (UInt 32) <- mkReg 1
-    let s0 :: Vector 2 (Reg (UInt 32))
-        s0 = update (update newVector 0 s0_0) 1 s0_1
-    s0_idx :: Reg (Bit 64) <- mkReg 0
+* `FibsIfc.bs`: This file defines a module interface `FibsIfc`, whose methods
+  correspond to the names of the triggers in the Copilot spec:
 
-    let s0_get :: Bit 64 -> UInt 32
-        s0_get x = (select s0 ((s0_idx + x) % 2))._read;
+  ```bluespec
+  package FibsIfc where
 
-        s0_gen :: UInt 32
-        s0_gen = s0_get 0 + s0_get 1
+  import FloatingPoint
+  import Vector
 
-        even_guard :: Bool
-        even_guard =
-          (s0_get 0 % 2) == 0
+  import FibsTypes
 
-        odd_guard :: Bool
-        odd_guard =
-          not (s0_get 0 % 2 == 0)
+  interface FibsIfc =
+    even :: UInt 32 -> Action
+    odd :: UInt 32 -> Action
+  ```
 
-    rules
-      "even": when even_guard ==>
-        ifc.even (s0_get 0)
+  In order for an application to make use of a Copilot monitor, it must
+  instantiate `FibsIfc`'s methods. Each method takes a `UInt 32` (an unsigned
+  32-bit integer) as an argument and return an `Action`, which is the Bluespec
+  type for expressions that act on the state of the circuit (at circuit
+  execution time). Possible `Action`s include reading from and writing to
+  registers, as well as printing messages.
 
-      "odd:": when odd_guard ==>
-        ifc.odd (s0_get 0)
+  We will see an example of how to instantiate `FibsIfc` later.
 
-      "step": when True ==>
-        action
-          select s0 s0_idx := s0_gen
-          s0_idx := (s0_idx + 1) % 2
-```
+* `Fibs.bs`: This file defines a `mkFibs` function, which orchestrates
+  everything in the generated Bluespec monitor:
 
-(Note that the actual code is machine-generated and somewhat more difficult to
-read. We have cleaned up the code slightly to make it easier to understand.)
+  ```bluespec
+  package Fibs where
 
-The `mkFibs` function orchestrates everything in the spec. It returns a module,
-which can be thought of as a generator of hardware objects. It also accepts
-another module as an argument, which is parameterized by the `FibsIfc`
-interface. An interface defines _methods_, which control how the environment
-interacts with the module. There are two interfaces in use in `mkFibs`:
+  import FloatingPoint
+  import Vector
 
-* `Empty`, a standard interface with no methods. `Empty` is typically used
-  in top-level modules.
-* `FibsIfc`, a generated interface whose methods correspond to the names of
-  the triggers in the Copilot spec.
+  import FibsTypes
+  import FibsIfc
+
+  mkFibs :: Module FibsIfc -> Module Empty
+  mkFibs ifcMod =
+    module
+      ifc <- ifcMod
+
+      s0_0 :: Reg (UInt 32) <- mkReg 1
+      s0_1 :: Reg (UInt 32) <- mkReg 1
+      let s0 :: Vector 2 (Reg (UInt 32))
+          s0 = update (update newVector 0 s0_0) 1 s0_1
+      s0_idx :: Reg (Bit 64) <- mkReg 0
+
+      let s0_get :: Bit 64 -> UInt 32
+          s0_get x = (select s0 ((s0_idx + x) % 2))._read
+
+          s0_gen :: UInt 32
+          s0_gen = s0_get 0 + s0_get 1
+
+          even_guard :: Bool
+          even_guard =
+            (s0_get 0 % 2) == 0
+
+          odd_guard :: Bool
+          odd_guard =
+            not (s0_get 0 % 2 == 0)
+
+      rules
+        "even": when even_guard ==>
+          ifc.even (s0_get 0)
+
+        "odd:": when odd_guard ==>
+          ifc.odd (s0_get 0)
+
+        "step": when True ==>
+          action
+            select s0 s0_idx := s0_gen
+            s0_idx := (s0_idx + 1) % 2
+  ```
+
+  `mkFibs` returns a module, which can be thought of as a generator of hardware
+  objects. `mkFibs` takes a `FibsIfc` module as an argument and returns another
+  module, which is parameterized by `Empty`. `Empty` is a standard interface
+  with no methods, and `Empty` is typically used in top-level modules that act
+  as program entrypoints.
 
 In a larger application, a Copilot user would instantiate `mkFibs` with a
 `FibsIfc` module that describes what should happen when the `even` and `odd`
@@ -140,12 +175,12 @@ everything else is handled within the module that `mkFibs` returns.
 
 Here is an example of a larger application might look like:
 
-TODO RGS: Update the code below once the codegen is finalized
-
 ```bluespec
 package Top where
 
 import Fibs
+import FibsIfc
+import FibsTypes
 
 fibsIfc :: Module FibsIfc
 fibsIfc =
@@ -201,12 +236,30 @@ only 9 messages are printed.
 ## Streams
 
 Much like in `copilot-c99`, `copilot-bluespec` translates each stream
-declaration into a ring buffer. More concretely, it translates a `Stream` into
-a `Vector n (Reg t)`, where `n` is the minimum number of elements needed to
-computer later values in the stream, and `t` is the stream's element type.
-`Reg` is a register, which stores a value that can be read from and written to.
-As time advances, we will update the `Reg`s in the ring buffer with later
-values in the stream.
+declaration into a ring buffer. More concretely, it translates a `Stream t`
+into a `Vector n (Reg t)`, where:
+
+* A `Vector` is an array whose length is encoded at the type level, must
+  like Copilot's arrays. (Note that Bluespec has a separate `Array` type, but
+  `Array`s are more low-level, and they are not indexed by their length at the
+  type level.)
+
+* `n` is the minimum number of elements needed to compute later values in the
+  stream.
+
+* `t` is the stream's element type.
+
+* `Reg` is a register, which stores a value that can be read from and written
+  to. As time advances, we will update the `Reg`s in the ring buffer with later
+  values in the stream.
+
+(Commentary: a ring buffer is not the only way we could translate a stream to
+Bluespec. Bluespec also has a
+[`MIMO`](https://github.com/B-Lang-org/bsc/blob/f00d205867eefe09c60e11b4df155bb87041799a/src/Libraries/Base3-Misc/MIMO.bsv#L52-L73)
+(many-in, many-out) queue that is _almost_ suitable for our needs, but it comes
+with an unusual restriction that it must have a minimum size of 2 elements.
+There exist Copilot streams that only require one element of storage, so we
+would have to special-case these streams if we wanted to use a `MIMO`.)
 
 The `Fibs.bs` example above contains exactly one stream, which is created at
 the top of the `mkFibs` function:
@@ -221,23 +274,24 @@ the top of the `mkFibs` function:
 
 Here, `s0_idx`, tracks the index of the next stream element to be updated.
 `mkFibs` then defines several functions in terms of `s0` and `s0_idx`, which
-are then used in the rules.
+are then used in the rules, which we will describe later. Note that `s0_idx` is
+a register of type `Bit 64`, which can be thought of as a raw 64-bit value.
 
-(Commentary: a ring buffer is not the only way we could translate a stream to
-Bluespec. Bluespec also has a `MIMO` (many-in, many-out) queue that is _almost_
-suitable for our needs, but it comes with an unusual restriction that it must
-have a minimum size of 2 elements. There exist Copilot streams that only
-require one element of storage, so we would have to special-case these streams
-if we wanted to use a `MIMO`.)
+In order to access an element of a stream, we make use of the `s0_get`
+function:
 
-## Triggers
+```bluespec
+      let s0_get :: Bit 64 -> UInt 32
+          s0_get x = (select s0 ((s0_idx + x) % 2))._read
+```
 
-TODO RGS
+This will use `s0_idx` and an offset `x` to compute which `Reg` in the `Vector`
+to read from.
 
 ## Rules
 
-The rules govern what actions are performed during each cycle. There
-are three actions in the `Fibs.hs` example:
+The _rules_ govern what actions are performed during each cycle. There are
+three actions in the `Fibs.hs` example:
 
 ```bluespec
     rules
@@ -251,6 +305,56 @@ are three actions in the `Fibs.hs` example:
         select s0 s0_idx := s0_gen
         s0_idx := (s0_idx + 1) % 2
 ```
+
+Each rule consists of three parts:
+
+1. A label (e.g., `"even"`) that uniquely identifies the rule within the
+   module.
+
+2. An explicit condition, which is a boolean expression of the form
+   `when <cond> ==> ...`. In order for a rule to fire on a given clock cycle,
+   its explicit condition `<cond>` must hold.
+
+3. A rule body (e.g., `ifc.even (s0_get 0)`), which describes what action the
+   rule performs if it fires on a given clock cycle.
+
+In the example above, the `"even"` and `"odd"` rules govern the behavior of the
+triggers in the Copilot specification. These rules will only fire if
+`even_guard` or `odd_guard` hold, and if they fire, they will call the `even`
+or `odd` method of `FibsIfcs`, respectively. The definitions of `even_guard`
+and `odd_guard` are:
+
+```bluespec
+          even_guard :: Bool
+          even_guard =
+            (s0_get 0 % 2) == 0
+
+          odd_guard :: Bool
+          odd_guard =
+            not (s0_get 0 % 2 == 0)
+```
+
+The `"step"` rule is the heart of the Copilot specification, and it always runs
+on each clock cycle. `"step"` does two things:
+
+1. It computes the next element of the `s0` stream using the `s0_gen` function,
+   which is defined like so:
+
+   ```bluespec
+             s0_gen :: UInt 32
+             s0_gen = s0_get 0 + s0_get 1
+   ```
+
+2. It increments `s0_idx`, making sure to wrap around to `0` if its value
+   exceeds `1`.
+
+Note that Bluespec rules are _atomic_, which means that the Bluespec compiler
+will ensure that the rules are executed in some logical order that ensures the
+absence of race conditions.
+
+## External streams
+
+TODO RGS
 
 # Notes
 

@@ -51,8 +51,8 @@ compileWith bsSettings prefix spec
 
        let dir = bluespecSettingsOutputDirectory bsSettings
        createDirectoryIfMissing True dir
-       writeFile (dir </> specTypesName prefix ++ ".bs") typesBsFile
-       writeFile (dir </> specIfcName prefix ++ ".bs") ifcBsFile
+       writeFile (dir </> specTypesPkgName prefix ++ ".bs") typesBsFile
+       writeFile (dir </> specIfcPkgName prefix ++ ".bs") ifcBsFile
        writeFile (dir </> prefix ++ ".bs") bsFile
 
 -- | Compile a specification to a Bluespec.
@@ -103,9 +103,9 @@ compileBS _bsSettings prefix spec =
     genImports :: [BS.CImport]
     genImports =
       [ BS.CImpId False $ BS.mkId BS.NoPos $ fromString
-                        $ specTypesName prefix
+                        $ specTypesPkgName prefix
       , BS.CImpId False $ BS.mkId BS.NoPos $ fromString
-                        $ specIfcName prefix
+                        $ specIfcPkgName prefix
       ]
 
     moduleDef :: BS.CDefn
@@ -189,7 +189,7 @@ compileBS _bsSettings prefix spec =
 compileIfcBS :: BluespecSettings -> String -> Spec -> BS.CPackage
 compileIfcBS _bsSettings prefix spec =
     BS.CPackage
-      ifcId
+      ifcPkgId
       (Right [])
       (stdLibImports ++ genImports)
       []
@@ -200,10 +200,11 @@ compileIfcBS _bsSettings prefix spec =
     genImports :: [BS.CImport]
     genImports =
       [ BS.CImpId False $ BS.mkId BS.NoPos $ fromString
-                        $ specTypesName prefix
+                        $ specTypesPkgName prefix
       ]
 
     ifcId     = BS.mkId BS.NoPos $ fromString $ specIfcName prefix
+    ifcPkgId  = BS.mkId BS.NoPos $ fromString $ specIfcPkgName prefix
     ifcFields = mkSpecIfcFields triggers exts
 
     streams  = specStreams spec
@@ -233,7 +234,7 @@ compileTypesBS _bsSettings prefix spec =
       structDefs
       []
   where
-    typesId = BS.mkId BS.NoPos $ fromString $ specTypesName prefix
+    typesId = BS.mkId BS.NoPos $ fromString $ specTypesPkgName prefix
 
     structDefs = mkTypeDeclns exprs
 

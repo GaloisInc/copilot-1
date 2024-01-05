@@ -53,13 +53,17 @@ transType ty = case ty of
       len = toInteger $ typeLength ty
   Struct s -> BS.TCon $
     BS.TyCon
-      { BS.tcon_name = BS.mkId BS.NoPos $ fromString $ structName $ typeName s
+      { BS.tcon_name = BS.mkId BS.NoPos $
+                       fromString $
+                       uppercaseName $
+                       typeName s
       , BS.tcon_kind = Just BS.KStar
       , BS.tcon_sort =
           BS.TIstruct BS.SStruct $
           map (\(Value _tu field) ->
                 BS.mkId BS.NoPos $
                 fromString $
+                lowercaseName $
                 fieldName field)
               (toValues s)
       }

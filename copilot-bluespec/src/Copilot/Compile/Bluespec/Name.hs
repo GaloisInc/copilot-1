@@ -5,25 +5,37 @@ module Copilot.Compile.Bluespec.Name
   , guardName
   , ifcArgName
   , indexName
+  , lowercaseName
   , specIfcName
-  , specTypesName
+  , specIfcPkgName
+  , specTypesPkgName
   , streamAccessorName
   , streamElemName
   , streamName
-  , structName
+  , uppercaseName
   ) where
+
+-- External imports
+import Data.Char (isLower, isUpper)
 
 -- External imports: Copilot
 import Copilot.Core (Id)
 
 -- | Turn a specification name into the name of its module interface.
 specIfcName :: String -> String
-specIfcName prefix = prefix ++ "Ifc"
+specIfcName prefix = uppercaseName (specIfcPkgName prefix)
 
--- | Turn a specification name into the name of the module that declares its
+-- | Turn a specification name into the name of the package that declares its
+-- module interface. Note that 'specIfcPkgName' is not necessarily the same name
+-- as 'specIfcName', as the former does not need to begin with an uppercase
+-- letter, but the latter does.
+specIfcPkgName :: String -> String
+specIfcPkgName prefix = prefix ++ "Ifc"
+
+-- | Turn a specification name into the name of the package that declares its
 -- struct types.
-specTypesName :: String -> String
-specTypesName prefix = prefix ++ "Types"
+specTypesPkgName :: String -> String
+specTypesPkgName prefix = prefix ++ "Types"
 
 -- | Turn a stream id into a stream element name.
 streamElemName :: Id -> Int -> String
@@ -34,13 +46,25 @@ streamElemName sId n = streamName sId ++ "_" ++ show n
 ifcArgName :: String
 ifcArgName = "ifc"
 
--- | Turn a Copilot struct name into the name of a Bluespec struct by prepending
--- the @BS_@ prefix (short for \"Bluespec\") at the front. This is done because
--- Bluespec requires all struct definitions to begin with an uppercase letter,
--- so prepending a prefix ensures that this requirement is meant while
--- regardless of how the original Copilot struct name is capitalized.
-structName :: String -> String
-structName n = "BS_" ++ n
+-- | Create a Bluespec name that must start with an uppercase letter (e.g., a
+-- struct or interface name). If the supplied name already begins with an
+-- uppercase letter, this function returns the name unchanged. Otherwise, this
+-- function prepends a @BS_@ prefix (short for \"Bluespec\") at the front.
+uppercaseName :: String -> String
+uppercaseName [] = []
+uppercaseName n@(c:_)
+  | isUpper c = n
+  | otherwise = "BS_" ++ n
+
+-- | Create a Bluespec name that must start with a lowercase letter (e.g., a
+-- function or method name). If the supplied name already begins with a
+-- lowercase letter, this function returns the name unchanged. Otherwise, this
+-- function prepends a @bs_@ prefix (short for \"Bluespec\") at the front.
+lowercaseName :: String -> String
+lowercaseName [] = []
+lowercaseName n@(c:_)
+  | isLower c = n
+  | otherwise = "bs_" ++ n
 
 -----
 -- TODO RGS: Everything below is copy-pasted directly from copilot-c99. Factor it out somewhere?
@@ -64,11 +88,11 @@ generatorName sId = streamName sId ++ "_gen"
 
 -- | Turn the name of a trigger into a guard generator.
 guardName :: String -> String
-guardName name = name ++ "_guard"
+guardName name = lowercaseName name ++ "_guard"
 
 -- | Turn a trigger name into a an trigger argument name.
 argName :: String -> Int -> String
-argName name n = name ++ "_arg" ++ show n
+argName name n = lowercaseName name ++ "_arg" ++ show n
 
 -- | Enumerate all argument names based on trigger name.
 argNames :: String -> [String]

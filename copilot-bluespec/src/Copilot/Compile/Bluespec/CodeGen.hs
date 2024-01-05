@@ -46,7 +46,7 @@ mkGenFun name expr ty =
       (BS.CDef nameId (BS.CQType [] (transType ty)) [def])
       []
   where
-    nameId = BS.mkId BS.NoPos $ fromString name
+    nameId = BS.mkId BS.NoPos $ fromString $ lowercaseName name
     def = BS.CClause [] [] (transExpr expr)
 
 -- | Bind a buffer variable and initialise it with the stream buffer.
@@ -163,7 +163,7 @@ mkTriggerRule (Trigger name _ args) =
       (BS.CApply nameExpr args')
   where
     ifcArgId = BS.mkId BS.NoPos $ fromString ifcArgName
-    nameId   = BS.mkId BS.NoPos $ fromString name
+    nameId   = BS.mkId BS.NoPos $ fromString $ lowercaseName name
     nameExpr = BS.CSelect (BS.CVar ifcArgId) nameId
 
     args'   = take (length args) (map argCall (argNames name))
@@ -230,17 +230,18 @@ mkStructDecln x =
       -- Derive a Bits instance so that we can put this struct in a Reg
       [BS.CTypeclass BS.idBits]
   where
-    structId = BS.mkId BS.NoPos $ fromString $ structName $ typeName x
+    structId = BS.mkId BS.NoPos $ fromString $ uppercaseName $ typeName x
     structFields = map mkStructField $ toValues x
 
     mkStructField :: Value a -> BS.CField
-    mkStructField (Value ty field) = mkField (fieldName field) (transType ty)
+    mkStructField (Value ty field) =
+      mkField (fieldName field) (transType ty)
 
 -- | Write a field of a struct or interface, along with its type.
 mkField :: String -> BS.CType -> BS.CField
 mkField name ty =
   BS.CField
-    { BS.cf_name = BS.mkId BS.NoPos $ fromString name
+    { BS.cf_name = BS.mkId BS.NoPos $ fromString $ lowercaseName name
     , BS.cf_pragmas = Nothing
     , BS.cf_type = BS.CQType [] ty
     , BS.cf_default = []

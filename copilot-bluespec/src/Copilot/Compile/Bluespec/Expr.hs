@@ -53,7 +53,7 @@ transExpr (ExternVar _ name _) =
   BS.CSelect
     (BS.CSelect
       (BS.CVar ifcArgId)
-      (BS.mkId BS.NoPos $ fromString name))
+      (BS.mkId BS.NoPos $ fromString $ lowercaseName name))
     (BS.id_read BS.NoPos)
 
 transExpr (Label _ _ e) = transExpr e -- ignore label
@@ -88,7 +88,7 @@ transOp1 op e =
 
     Cast fromTy toTy -> transCast fromTy toTy e
     GetField (Struct _)  _ f -> BS.CSelect e $ BS.mkId BS.NoPos $
-                                fromString $ accessorName f
+                                fromString $ lowercaseName $ accessorName f
     GetField _ _ _ -> impossible "transOp1" "copilot-bluespec"
 
     -- Unsupported operations (see
@@ -367,9 +367,11 @@ constTy ty =
     Struct s -> \v ->
       BS.CStruct
         (Just True)
-        (BS.mkId BS.NoPos $ fromString $ structName $ typeName s)
+        (BS.mkId BS.NoPos $ fromString $ uppercaseName $ typeName s)
         (map (\(Value ty'' field@(Field val)) ->
-               ( BS.mkId BS.NoPos $ fromString $ fieldName field
+               ( BS.mkId BS.NoPos $ fromString
+                                  $ lowercaseName
+                                  $ fieldName field
                , constTy ty'' val
                ))
              (toValues v))

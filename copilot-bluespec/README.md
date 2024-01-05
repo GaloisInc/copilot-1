@@ -18,6 +18,9 @@ For further information, install instructions and documentation, please visit
 the Copilot website:
 [https://copilot-language.github.io](https://copilot-language.github.io)
 
+There is also an implementation-focused design document
+[here](https://raw.githubusercontent.com/Copilot-Language/copilot/master/copilot-bluespec/DESIGN.md).
+
 
 ## License
 Copilot is distributed under the BSD-3-Clause license, which can be found

@@ -12,6 +12,7 @@ module Copilot.Compile.Bluespec.Expr
   ) where
 
 -- External imports
+import Data.Foldable (foldl')
 import Data.String (IsString (..))
 import qualified Language.Bluespec.Classic.AST as BS
 import qualified Language.Bluespec.Classic.AST.Builtin.Ids as BS
@@ -388,8 +389,8 @@ constVector ty = genVector (\_ -> constTy ty)
 genVector :: (Int -> a -> BS.CExpr) -> [a] -> BS.CExpr
 genVector f vec =
   snd $
-  foldr
-    (\x (!i, !v) ->
+  foldl'
+    (\(!i, !v) x ->
       ( i+1
       , BS.CApply
           (BS.CVar (BS.mkId BS.NoPos "update"))

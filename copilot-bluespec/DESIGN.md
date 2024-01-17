@@ -661,22 +661,20 @@ the common case.
 as it is limited by what operations are provided by Bluespec's standard
 libraries. The following floating-point operations are supported:
 
-* Addition
-* Subtraction
-* Multiplication
-* Division
+* Basic arithmetic (`(+)`, `(-)`, `(*)`, `(/)`)
+* Equality checking (`(==)` and `(/=)`)
+* Inequality checking (`(<)`, `(<=)`, `(>)`, and `(>=)`)
+* `abs`
+* `signum`
 * `recip`
 * `sqrt`
-* Equality checking
-* Inequality checking
 
 The following floating-point operations are _not_ supported:
 
-* `exp`
-* `log`
 * `acos`
 * `asin`
 * `atan`
+* `atan2`
 * `cos`
 * `sin`
 * `tan`
@@ -686,6 +684,10 @@ The following floating-point operations are _not_ supported:
 * `cosh`
 * `sinh`
 * `tanh`
+* `exp`
+* `pow`
+* `log`
+* `logb`
 * `ceiling`
 * `floor`
 

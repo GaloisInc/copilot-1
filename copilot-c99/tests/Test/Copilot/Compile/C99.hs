@@ -14,6 +14,7 @@ import Data.Bits                            (Bits, complement)
 import Data.List                            (intercalate)
 import Data.Type.Equality                   (testEquality)
 import Data.Typeable                        (Proxy (..), (:~:) (Refl))
+import GHC.Stack                            (emptyCallStack)
 import GHC.TypeLits                         (KnownNat, natVal)
 import System.Directory                     (doesFileExist,
                                              getTemporaryDirectory,
@@ -83,9 +84,9 @@ testCompile = ioProperty $ do
 
     spec = Spec streams observers triggers properties
 
-    streams    = [ Stream 0 [1] (Const Int8 1) Int8]
+    streams    = [ Stream 0 [1] (Const Int8 1) Int8 emptyCallStack ]
     observers  = []
-    triggers   = [ Trigger function guard args ]
+    triggers   = [ Trigger function guard args emptyCallStack ]
     properties = []
 
     function = "func"
@@ -126,9 +127,9 @@ testCompileCustomDir = ioProperty $ do
 
     spec = Spec streams observers triggers properties
 
-    streams    = [ Stream 0 [1] (Const Int8 1) Int8]
+    streams    = [ Stream 0 [1] (Const Int8 1) Int8 emptyCallStack ]
     observers  = []
-    triggers   = [ Trigger function guard args ]
+    triggers   = [ Trigger function guard args emptyCallStack ]
     properties = []
 
     function = "nop"
@@ -189,9 +190,9 @@ testRun = ioProperty $ do
 
     spec = Spec streams observers triggers properties
 
-    streams    = [ Stream 0 [1] (Const Int8 1) Int8]
+    streams    = [ Stream 0 [1] (Const Int8 1) Int8 emptyCallStack ]
     observers  = []
-    triggers   = [ Trigger function guard args ]
+    triggers   = [ Trigger function guard args emptyCallStack ]
     properties = []
 
     function = "nop"
@@ -765,7 +766,7 @@ alwaysTriggerArg1 = triggerArg1 (Const Bool True)
         observers  = []
         properties = []
 
-        triggers = [ Trigger function guard args ]
+        triggers = [ Trigger function guard args emptyCallStack ]
         function = "printBack"
         args     = [ expr ]
 

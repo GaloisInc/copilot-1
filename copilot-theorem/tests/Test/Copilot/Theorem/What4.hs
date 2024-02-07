@@ -6,6 +6,7 @@ module Test.Copilot.Theorem.What4 where
 
 -- External imports
 import Data.Int                             (Int8)
+import GHC.Stack                            (emptyCallStack)
 import Test.Framework                       (Test, testGroup)
 import Test.Framework.Providers.QuickCheck2 (testProperty)
 import Test.QuickCheck                      (Property, arbitrary, forAll)
@@ -95,7 +96,8 @@ checkResult solver propName spec expectation = do
 -- | Build a 'Spec' that contains one property with the given name and defined
 -- by the given boolean expression.
 propSpec :: String -> Expr Bool -> Spec
-propSpec propName propExpr = Spec [] [] [] [Copilot.Property propName propExpr]
+propSpec propName propExpr =
+  Spec [] [] [] [Copilot.Property propName propExpr emptyCallStack]
 
 -- | Equality for 'SatResult'.
 --

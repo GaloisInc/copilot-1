@@ -15,6 +15,7 @@ import Data.List                            (lookup)
 import Data.Maybe                           (fromMaybe)
 import Data.Typeable                        (Typeable)
 import Data.Word                            (Word16, Word32, Word64, Word8)
+import GHC.Stack                            (emptyCallStack)
 import Test.Framework                       (Test, testGroup)
 import Test.Framework.Providers.QuickCheck2 (testProperty)
 import Test.QuickCheck                      (Arbitrary, Gen, Property,
@@ -131,7 +132,7 @@ arbitraryDrop (SemanticsP (expr, meaning)) = do
 
   -- Build the stream with the buffer
   let streamId = 0
-      stream   = Stream streamId buffer expr typeOf
+      stream   = Stream streamId buffer expr typeOf emptyCallStack
 
   -- Select how many elements to drop from the stream (up to the length of the
   -- buffer)

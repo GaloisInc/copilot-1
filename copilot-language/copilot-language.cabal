@@ -62,6 +62,7 @@ library
                  , Copilot.Language.Operators.Temporal
                  , Copilot.Language.Operators.Array
                  , Copilot.Language.Operators.Struct
+                 , Copilot.Language.Operators.Projection
                  , Copilot.Language.Prelude
                  , Copilot.Language.Reify
                  , Copilot.Language.Stream

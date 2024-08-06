@@ -36,6 +36,7 @@ module Copilot.Core.Type
     , Struct
     , fieldName
     , accessorName
+    , updateField
     )
   where
 
@@ -88,6 +89,9 @@ instance (GStruct f, GStruct g) => GStruct (f :*: g) where
 -- Turn one Value into another, changing its phantom type
 coerceValuePhantom :: forall a b. Value a -> Value b
 coerceValuePhantom (Value t v) = (Value t v) 
+
+  updateField :: a -> Value t -> a
+  updateField = error "Field updates not supported for this type."
 
 -- | The field of a struct, together with a representation of its type.
 data Value a =

@@ -66,6 +66,9 @@ class Struct a where
   default toValues :: (Generic a, GStruct (Rep a)) => a -> [Value a]
   toValues x = coerceValuePhantom <$> gToValues (from x)
 
+  updateField :: a -> Value t -> a
+  updateField = error "Field updates not supported for this type."
+
 class GStruct f where
   gToValues :: f p -> [Value (f p)]
 
@@ -88,10 +91,7 @@ instance (GStruct f, GStruct g) => GStruct (f :*: g) where
 
 -- Turn one Value into another, changing its phantom type
 coerceValuePhantom :: forall a b. Value a -> Value b
-coerceValuePhantom (Value t v) = (Value t v) 
-
-  updateField :: a -> Value t -> a
-  updateField = error "Field updates not supported for this type."
+coerceValuePhantom (Value t v) = (Value t v)
 
 -- | The field of a struct, together with a representation of its type.
 data Value a =

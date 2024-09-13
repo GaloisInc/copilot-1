@@ -4,8 +4,8 @@
 {-# LANGUAGE FlexibleInstances         #-}
 {-# LANGUAGE GADTs                     #-}
 {-# LANGUAGE KindSignatures            #-}
-{-# LANGUAGE Safe                      #-}
 {-# LANGUAGE ScopedTypeVariables       #-}
+{-# LANGUAGE Trustworthy               #-}
 {-# LANGUAGE TypeOperators             #-}
 {-# LANGUAGE UndecidableInstances      #-}
 {-# LANGUAGE DefaultSignatures #-}
@@ -37,10 +37,18 @@ module Copilot.Core.Type
     , fieldName
     , accessorName
     , updateField
+
+    , GenericStruct(..)
+    , defaultToValues
+    , defaultUpdateField
+    , defaultTypeOf
+    , GStruct(..)
+    , GTypedStruct(..)
     )
   where
 
 -- External imports
+import Data.Coerce        (coerce)
 import Data.Int           (Int16, Int32, Int64, Int8)
 import Data.List          (intercalate)
 import Data.Proxy         (Proxy (..))
@@ -48,12 +56,12 @@ import Data.Type.Equality as DE
 import Data.Typeable      (Typeable, eqT, typeRep)
 import Data.Word          (Word16, Word32, Word64, Word8)
 import GHC.TypeLits       (KnownNat, KnownSymbol, Symbol, natVal, sameNat,
-                           symbolVal)
+                           sameSymbol, symbolVal)
 
 import GHC.Generics
 
 -- Internal imports
-import Copilot.Core.Type.Array (Array)
+import Copilot.Core.Type.Array (Array, array)
 
 -- | The value of that is a product or struct, defined as a constructor with
 -- several fields.
@@ -64,34 +72,79 @@ class Struct a where
   -- | Transforms all the struct's fields into a list of values.
   toValues :: a -> [Value a]
   default toValues :: (Generic a, GStruct (Rep a)) => a -> [Value a]
-  toValues x = coerceValuePhantom <$> gToValues (from x)
+  toValues = defaultToValues
 
   updateField :: a -> Value t -> a
-  updateField = error "Field updates not supported for this type."
+  default updateField :: (Generic a, GStruct (Rep a)) => a -> Value t -> a
+  updateField = defaultUpdateField
 
+-- | TODO RGS: Docs
+newtype GenericStruct (typeName :: Symbol) a = GenericStruct a
+  deriving Show
+
+-- TODO RGS: Docs
+instance (KnownSymbol typeName, Generic a, GStruct (Rep a))
+    => Struct (GenericStruct typeName a) where
+  typeName _ = symbolVal (Proxy @typeName)
+  toValues (GenericStruct x) = coerce $ defaultToValues x
+  updateField (GenericStruct x) v = GenericStruct (defaultUpdateField x v)
+
+-- | TODO RGS: Docs
+defaultToValues :: (Generic a, GStruct (Rep a)) => a -> [Value a]
+defaultToValues x = coerce $ gToValues $ from x
+
+-- | TODO RGS: Docs
+defaultUpdateField :: (Generic a, GStruct (Rep a)) => a -> Value t -> a
+defaultUpdateField a v@(Value _ field)
+  | updated   = to a'
+  | otherwise = error $ "Unexpected field: " ++ show field
+  where
+    (a', updated) = gUpdateField (from a) v
+
+-- | TODO RGS: Docs
 class GStruct f where
+  -- | TODO RGS: Docs
   gToValues :: f p -> [Value (f p)]
+  -- | TODO RGS: Docs
+  gUpdateField :: f p -> Value t -> (f p, Bool)
 
+-- TODO RGS: Docs
 instance GStruct U1 where
   -- A unit-like type has no fields, so its values list is empty
   gToValues U1 = []
+  -- TODO RGS: Docs
+  gUpdateField u _ = (u, False)
 
-instance (GStruct f) => GStruct (M1 _i _t f) where
+-- TODO RGS: Docs
+instance GStruct f => GStruct (M1 _i _t f) where
   -- Generics Metadata is not used by this typeclass
   -- we are only interested in its contents
-  gToValues (M1 x) = coerceValuePhantom <$> gToValues x
+  gToValues (M1 x) = coerce $ gToValues x
+  -- TODO RGS: Docs
+  gUpdateField (M1 x) v = (M1 x', updated)
+    where
+      (x', updated) = gUpdateField x v
 
-instance (Typed ty, KnownSymbol name) => GStruct (K1 i (Field name ty)) where
+-- TODO RGS: Docs
+instance (KnownSymbol name, Typed ty, c ~ Field name ty) =>
+    GStruct (K1 i c) where
   -- Base case for each contained field
   gToValues (K1 field) = [Value typeOf field]
+  -- TODO RGS: Docs
+  gUpdateField (K1 oldField) (Value newTy (newField :: Field newName newTy)) =
+    case (sameSymbol (Proxy @name) (Proxy @newName), testEquality (typeOf :: Type ty) newTy) of
+      (Just Refl, Just Refl) -> (K1 newField, True)
+      _                      -> (K1 oldField, False)
 
+-- TODO RGS: Docs
 instance (GStruct f, GStruct g) => GStruct (f :*: g) where
   -- Product types (structs) contain the fields of all their elements
-  gToValues (f :*: g) = (coerceValuePhantom <$> (gToValues f)) ++ (coerceValuePhantom <$> (gToValues g))
-
--- Turn one Value into another, changing its phantom type
-coerceValuePhantom :: forall a b. Value a -> Value b
-coerceValuePhantom (Value t v) = (Value t v)
+  gToValues (f :*: g) = coerce (gToValues f) ++ coerce (gToValues g)
+  -- TODO RGS: Docs
+  gUpdateField (f :*: g) v = (f' :*: g', updatedF || updatedG)
+    where
+      (f', updatedF) = gUpdateField f v
+      (g', updatedG) = gUpdateField g v
 
 -- | The field of a struct, together with a representation of its type.
 data Value a =
@@ -223,11 +276,38 @@ instance Eq SimpleType where
 -- used by Copilot: 'Type' and 'SimpleType'.
 class (Show a, Typeable a) => Typed a where
   typeOf     :: Type a
-  simpleType :: Type a -> SimpleType
+  default typeOf :: (Struct a, Generic a, GTypedStruct (Rep a)) => Type a
+  typeOf = defaultTypeOf
 
-instance {-# OVERLAPPABLE #-} (Show a, Typeable a, Struct a) => Typed a where
-  typeOf = Struct undefined
+  simpleType :: Type a -> SimpleType
   simpleType _ = SStruct
+
+-- TODO RGS: Docs
+defaultTypeOf ::
+  forall a. (Typed a, Struct a, Generic a, GTypedStruct (Rep a)) => Type a
+defaultTypeOf =
+  Struct $ to $ gStructPlaceholder @(Rep a) @()
+
+-- | TODO RGS: Docs
+class GTypedStruct f where
+  -- | TODO RGS: Docs
+  gStructPlaceholder :: f p
+
+-- TODO RGS: Docs
+instance GTypedStruct U1 where
+  gStructPlaceholder = U1
+
+-- TODO RGS: Docs
+instance GTypedStruct f => GTypedStruct (M1 _i _t f) where
+  gStructPlaceholder = M1 gStructPlaceholder
+
+-- TODO RGS: Docs
+instance (c ~ Field name ty) => GTypedStruct (K1 i c) where
+  gStructPlaceholder = K1 $ Field undefined
+
+-- TODO RGS: Docs
+instance (GTypedStruct f, GTypedStruct g) => GTypedStruct (f :*: g) where
+  gStructPlaceholder = gStructPlaceholder :*: gStructPlaceholder
 
 instance Typed Bool where
   typeOf       = Bool

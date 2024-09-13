@@ -2,7 +2,10 @@
 -- nested structs) are compiled to C using copilot-c99.
 
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE DerivingVia #-}
 
 module Main where
 
@@ -19,24 +22,34 @@ data Volts = Volts
   { numVolts :: Field "numVolts" Word16
   , flag     :: Field "flag"     Bool
   }
-  deriving Generic
+  deriving stock Generic
+  deriving anyclass Typed
+  deriving Struct via (GenericStruct "volts" Volts)
 
+{-
 -- | `Struct` instance for `Volts`.
 -- toValues is automatically implemented using Generic
 -- Also, no need to manually implement `Typed` is necessary.
 instance Struct Volts where
   typeName _ = "volts"
+instance Typed Volts
+-}
 
 data Battery = Battery
   { temp  :: Field "temp"  Word16
   , volts :: Field "volts" (Array 10 Volts)
   , other :: Field "other" (Array 10 (Array 5 Word32))
   }
-  deriving Generic
+  deriving stock Generic
+  deriving anyclass Typed
+  deriving Struct via (GenericStruct "battery" Battery)
 
+{-
 -- | `Battery` instance for `Struct`.
 instance Struct Battery where
   typeName _ = "battery"
+instance Typed Battery
+-}
 
 spec :: Spec
 spec = do

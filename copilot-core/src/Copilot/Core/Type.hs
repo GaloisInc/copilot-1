@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds                 #-}
+{-# LANGUAGE DefaultSignatures         #-}
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE FlexibleContexts          #-}
 {-# LANGUAGE FlexibleInstances         #-}
@@ -65,24 +66,23 @@ import Copilot.Core.Type.Array (Array)
 class Struct a where
   -- | Returns the name of struct in the target language.
   typeName :: a -> String
+  default typeName :: (Generic a, GDatatype (Rep a)) => a -> String
+  typeName = typeNameDefault
 
   -- | Transforms all the struct's fields into a list of values.
   toValues :: a -> [Value a]
+  default toValues :: (Generic a, GStruct (Rep a)) => a -> [Value a]
+  toValues = toValuesDefault
 
   -- | Update the value of a struct field. This is only used by the Copilot
   -- interpreter.
-  --
-  -- If you do not plan to use the interpreter, you can omit an implementation
-  -- of this method. If you do so, it is recommended that you derive a 'Generic'
-  -- instance for the struct data type. This is because in a future release, the
-  -- default implementation of 'updateField' (which will be picked if there is
-  -- not a manually written implementation) will be changed to require a
-  -- 'Generic' instance.
   --
   -- In order to implement 'updateField', pick one of the following approaches:
   --
   -- * Derive a 'Generic' instance for the struct data type and then define
   --   @'updateField' = 'updateFieldDefault'@ in the 'Struct' instance.
+  --   (Alternatively, you can omit the definition entirely, as the default
+  --   implementation of 'updateField' does the same thing.)
   --
   -- * Manually implement 'updateField' by doing the following for each 'Field'
   --   in a struct:
@@ -100,10 +100,8 @@ class Struct a where
   --   implement 'updateField' and use it in the Copilot interpreter, see the
   --   @examples/StructsUpdateField.hs@ example in the @copilot@ library.
   updateField :: a -> Value t -> a
-  updateField = error $ unlines
-    [ "Field updates not supported for this type."
-    , "(Perhaps you need to implement 'updateField' for a 'Struct' instance?)"
-    ]
+  default updateField :: (Generic a, GStruct (Rep a)) => a -> Value t -> a
+  updateField = updateFieldDefault
 
 -- | The field of a struct, together with a representation of its type.
 data Value a =
@@ -234,7 +232,10 @@ instance Eq SimpleType where
 -- | A typed expression, from which we can obtain the two type representations
 -- used by Copilot: 'Type' and 'SimpleType'.
 class (Show a, Typeable a) => Typed a where
-  typeOf     :: Type a
+  typeOf :: Type a
+  default typeOf :: (Struct a, Generic a, GTypedStruct (Rep a)) => Type a
+  typeOf = typeOfDefault
+
   simpleType :: Type a -> SimpleType
   simpleType _ = SStruct
 

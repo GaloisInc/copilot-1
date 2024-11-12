@@ -3,6 +3,7 @@
 -- For general usage of structs, refer to the general structs example.
 
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
 
 module Main where
@@ -18,38 +19,13 @@ import Copilot.Theorem.What4
 data Volts = Volts
   { numVolts :: Field "numVolts" Word16
   , flag     :: Field "flag"     Bool
-  } deriving Generic
-
--- | `Struct` instance for `Volts`.
-instance Struct Volts where
-  typeName = typeNameDefault
-  toValues = toValuesDefault
-  -- Note that we do not implement `updateField` here. `updateField` is only
-  -- needed to make updates to structs work in the Copilot interpreter, and we
-  -- do not use the interpreter in this example. (See
-  -- `examples/StructsUpdateField.hs` for an example that does implement
-  -- `updateField`.)
-
--- | `Volts` instance for `Typed`.
-instance Typed Volts where
-  typeOf = typeOfDefault
+  } deriving (Generic, Struct, Typed)
 
 data Battery = Battery
   { temp  :: Field "temp"  Word16
   , volts :: Field "volts" (Array 10 Volts)
   , other :: Field "other" (Array 10 (Array 5 Word32))
-  } deriving Generic
-
--- | `Battery` instance for `Struct`.
-instance Struct Battery where
-  typeName = typeNameDefault
-  toValues = toValuesDefault
-  -- Note that we do not implement `updateField` here for the same reasons as in
-  -- the `Struct Volts` instance above.
-
--- | `Battery` instance for `Typed`.
-instance Typed Battery where
-  typeOf = typeOfDefault
+  } deriving (Generic, Struct, Typed)
 
 spec :: Spec
 spec = do

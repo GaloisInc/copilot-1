@@ -3,6 +3,7 @@
 -- copilot-c99.
 
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -24,12 +25,10 @@ import Copilot.Compile.C99
 data Volts = Volts
   { numVolts :: Field "numVolts" Word16
   , flag     :: Field "flag"     Bool
-  } deriving Generic
+  } deriving (Generic, Typed)
 
 -- | `Struct` instance for `Volts`.
 instance Struct Volts where
-  typeName = typeNameDefault
-  toValues = toValuesDefault
   -- In order to run struct updates (as used in the "equalityStructUpdate"
   -- trigger below) in the Copilot interpreter, we must implement the
   -- `updateField` method. To do so, we must check to see if the supplied
@@ -68,20 +67,14 @@ instance Struct Volts where
     | otherwise
     = error $ "Unexpected field: " P.++ show field
 
--- | `Volts` instance for `Typed`.
-instance Typed Volts where
-  typeOf = typeOfDefault
-
 data Battery = Battery
   { temp  :: Field "temp"  Word16
   , volts :: Field "volts" (Array 10 Volts)
   , other :: Field "other" (Array 10 (Array 5 Word32))
-  } deriving Generic
+  } deriving (Generic, Typed)
 
 -- | `Battery` instance for `Struct`.
 instance Struct Battery where
-  typeName = typeNameDefault
-  toValues = toValuesDefault
   -- We implement `updateField` similarly to how we implement it in the
   -- `Struct Volts` instance above. (Alternatively, we could define this as
   -- @updateField = updateFieldDefault@, but we demonstrate how to manually
@@ -104,10 +97,6 @@ instance Struct Battery where
 
     | otherwise
     = error $ "Unexpected field: " P.++ show field
-
--- | `Battery` instance for `Typed`.
-instance Typed Battery where
-  typeOf = typeOfDefault
 
 spec :: Spec
 spec = do

@@ -1,3 +1,6 @@
+????-??-??
+        * Use generic default implementations of Struct/Typed methods. (#???)
+
 2024-11-12
         * Define generic implementations of Struct and Typed methods. (#564)
 

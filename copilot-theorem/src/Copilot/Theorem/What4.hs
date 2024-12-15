@@ -35,8 +35,11 @@
 module Copilot.Theorem.What4
   ( -- * Proving properties about Copilot specifications
     prove
+  , prove'
   , Solver(..)
   , SatResult(..)
+  , SatResult'(..)
+  , CounterExample'(..)
     -- * Bisimulation proofs about @copilot-c99@ code
   , computeBisimulationProofBundle
   , BisimulationProofBundle(..)
@@ -45,9 +48,10 @@ module Copilot.Theorem.What4
   , XExpr(..)
   ) where
 
-import qualified Copilot.Core.Expr as CE
-import qualified Copilot.Core.Spec as CS
-import qualified Copilot.Core.Type as CT
+import qualified Copilot.Core.Expr       as CE
+import qualified Copilot.Core.Spec       as CS
+import qualified Copilot.Core.Type       as CT
+import qualified Copilot.Core.Type.Array as CTA
 
 import qualified What4.Config                   as WC
 import qualified What4.Expr.Builder             as WB
@@ -66,6 +70,7 @@ import qualified Data.Map as Map
 import Data.Parameterized.NatRepr
 import Data.Parameterized.Nonce
 import Data.Parameterized.Some
+import qualified Data.Parameterized.Vector as V
 import GHC.Float (castWord32ToFloat, castWord64ToDouble)
 import LibBF (BigFloat, bfToDouble, pattern NearEven)
 import qualified Panic as Panic
@@ -89,7 +94,21 @@ data Solver = CVC4 | DReal | Yices | Z3
 data SatResult = Valid | Invalid | Unknown
   deriving Show
 
+-- | The 'prove' function returns results of this form for each property in a
+-- spec.
+data SatResult' a = Valid' | Invalid' a | Unknown'
+  deriving Show
+
+-- | TODO RGS: Deprecate and/or remove this?
 type CounterExample = [(String, Some CopilotValue)]
+
+-- | TODO RGS: Docs
+data CounterExample' = CounterExample'
+  { -- | TODO RGS: Docs
+    groundExternVars :: Map.Map (CE.Name, StreamOffset) (Some CopilotValue)
+    -- | TODO RGS: Docs
+  , groundStreamValues :: Map.Map (CE.Id, StreamOffset) (Some CopilotValue)
+  }
 
 -- | Attempt to prove all of the properties in a spec via an SMT solver (which
 -- must be installed locally on the host). Return an association list mapping
@@ -99,7 +118,45 @@ prove :: Solver
       -> CS.Spec
       -- ^ Spec
       -> IO [(CE.Name, SatResult)]
-prove solver spec = do
+prove solver spec = proveInternal solver spec $ \_st satRes ->
+  case satRes of
+    WS.Sat _   -> pure Invalid
+    WS.Unsat _ -> pure Valid
+    WS.Unknown -> pure Unknown
+
+-- | TODO RGS: Docs
+prove' :: Solver
+       -- ^ Solver to use
+       -> CS.Spec
+       -- ^ Spec
+       -> IO [(CE.Name, SatResult' CounterExample')]
+prove' solver spec = proveInternal solver spec $ \st satRes ->
+  case satRes of
+    WS.Sat ge -> do
+      gevs <- traverse (valFromExpr ge) (externVars st)
+      gsvs <- traverse (valFromExpr ge) (streamValues st)
+      let cex = CounterExample'
+                  { groundExternVars = gevs
+                  , groundStreamValues = gsvs
+                  }
+      pure (Invalid' cex)
+    WS.Unsat _ -> pure Valid'
+    WS.Unknown -> pure Unknown'
+
+-- | TODO RGS: Docs
+proveInternal :: Solver
+              -- ^ Solver to use
+              -> CS.Spec
+              -- ^ Spec
+              -> (forall sym t st fm
+                   . ( sym ~ WB.ExprBuilder t st (WB.Flags fm)
+                     , WI.KnownRepr WB.FloatModeRepr fm )
+                  => TransState sym
+                  -> WS.SatResult (WG.GroundEvalFn t) ()
+                  -> IO a)
+              -- ^ TODO RGS: Docs
+              -> IO [(CE.Name, a)]
+proveInternal solver spec k = do
   -- Setup symbolic backend
   Some ng <- newIONonceGenerator
   sym <- WB.newExprBuilder WB.FloatIEEERepr EmptyState ng
@@ -153,23 +210,29 @@ prove solver spec = do
         not_p <- liftIO $ WI.notPred sym p
         let clauses = [not_p]
 
-        case solver of
-          CVC4 -> liftIO $ WS.runCVC4InOverride sym WS.defaultLogData clauses $ \case
-            WS.Sat (_ge, _) -> return (CS.propertyName pr, Invalid)
-            WS.Unsat _ -> return (CS.propertyName pr, Valid)
-            WS.Unknown -> return (CS.propertyName pr, Unknown)
-          DReal -> liftIO $ WS.runDRealInOverride sym WS.defaultLogData clauses $ \case
-            WS.Sat (_ge, _) -> return (CS.propertyName pr, Invalid)
-            WS.Unsat _ -> return (CS.propertyName pr, Valid)
-            WS.Unknown -> return (CS.propertyName pr, Unknown)
-          Yices -> liftIO $ WS.runYicesInOverride sym WS.defaultLogData clauses $ \case
-            WS.Sat _ge -> return (CS.propertyName pr, Invalid)
-            WS.Unsat _ -> return (CS.propertyName pr, Valid)
-            WS.Unknown -> return (CS.propertyName pr, Unknown)
-          Z3 -> liftIO $ WS.runZ3InOverride sym WS.defaultLogData clauses $ \case
-            WS.Sat (_ge, _) -> return (CS.propertyName pr, Invalid)
-            WS.Unsat _ -> return (CS.propertyName pr, Valid)
-            WS.Unknown -> return (CS.propertyName pr, Unknown)
+        st <- get
+        satRes <-
+          case solver of
+            CVC4 -> liftIO $ WS.runCVC4InOverride sym WS.defaultLogData clauses $ \case
+              WS.Sat (ge, _) -> k st (WS.Sat ge)
+              WS.Unsat x -> k st (WS.Unsat x)
+              WS.Unknown -> k st WS.Unknown
+            DReal -> liftIO $ WS.runDRealInOverride sym WS.defaultLogData clauses $ \case
+              WS.Sat (c, m) -> do
+                ge <- WS.getAvgBindings c m
+                k st (WS.Sat ge)
+              WS.Unsat x -> k st (WS.Unsat x)
+              WS.Unknown -> k st WS.Unknown
+            Yices -> liftIO $ WS.runYicesInOverride sym WS.defaultLogData clauses $ \case
+              WS.Sat ge -> k st (WS.Sat ge)
+              WS.Unsat x -> k st (WS.Unsat x)
+              WS.Unknown -> k st WS.Unknown
+            Z3 -> liftIO $ WS.runZ3InOverride sym WS.defaultLogData clauses $ \case
+              WS.Sat (ge, _) -> k st (WS.Sat ge)
+              WS.Unsat x -> k st (WS.Unsat x)
+              WS.Unknown -> k st WS.Unknown
+
+        pure (CS.propertyName pr, satRes)
 
   -- Execute the action and return the results for each property
   runTransM spec proveProperties
@@ -387,10 +450,14 @@ expectedBool :: forall m sym a.
 expectedBool what xe =
   panic [what ++ " expected to have boolean result", show xe]
 
-data CopilotValue a = CopilotValue { cvType :: CT.Type a
-                                   , cvVal :: a
-                                   }
+data CopilotValue a where
+  CopilotValue :: CT.Typed a =>
+                  { cvType :: CT.Type a
+                  , cvVal :: a
+                  }
+               -> CopilotValue a
 
+-- | TODO RGS: Docs
 valFromExpr :: forall sym t st fm.
                ( sym ~ WB.ExprBuilder t st (WB.Flags fm)
                , WI.KnownRepr WB.FloatModeRepr fm
@@ -420,7 +487,24 @@ valFromExpr ge xe = case xe of
                        (fst . bfToDouble NearEven)
                        fromRational
                        (castWord64ToDouble . fromInteger . BV.asUnsigned)
-  _ -> error "valFromExpr unhandled case"
+  XEmptyArray tp ->
+    pure $ Some $ CopilotValue (CT.Array @0 tp) (CTA.array [])
+  XArray es -> do
+    (someCVs :: V.Vector n a) <- traverse (valFromExpr ge) es
+    (Some (CopilotValue headTp _headVal), _) <- pure $ V.uncons someCVs
+    cvs <-
+      traverse
+        (\(Some (CopilotValue tp val)) ->
+          case tp `testEquality` headTp of
+            Just Refl -> pure val
+            Nothing -> panic [ "XArray with mismatched element types"
+                             -- TODO RGS: Show types?
+                             -- , show tp
+                             -- , show headTp
+                             ])
+        someCVs
+    pure $ Some $ CopilotValue (CT.Array @n headTp) (CTA.array (V.toList cvs))
+  XStruct _ -> error "valFromExpr: Structs not currently handled"
   where
     fromBV :: forall a w . Num a => BV.BV w -> a
     fromBV = fromInteger . BV.asUnsigned

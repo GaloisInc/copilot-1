@@ -32,11 +32,18 @@
 -- We perform @k@-induction on all the properties in a given specification where
 -- @k@ is chosen to be the maximum amount of delay on any of the involved
 -- streams. This is a heuristic choice, but often effective.
+--
+-- The functions in this module are only designed to prove universally
+-- quantified propositions (i.e., propositions that use @forAll@). Attempting to
+-- prove an existentially quantified proposition (i.e., propositions that use
+-- @exists@) will cause a 'UnexpectedExistentialProposition' exception to be
+-- thrown.
 module Copilot.Theorem.What4
   ( -- * Proving properties about Copilot specifications
     prove
   , Solver(..)
   , SatResult(..)
+  , ProveException(..)
     -- * Bisimulation proofs about @copilot-c99@ code
   , computeBisimulationProofBundle
   , BisimulationProofBundle(..)
@@ -57,6 +64,7 @@ import qualified What4.InterpretedFloatingPoint as WFP
 import qualified What4.Solver                   as WS
 import qualified What4.Solver.DReal             as WS
 
+import Control.Exception (Exception, throw)
 import Control.Monad (forM)
 import Control.Monad.State
 import qualified Data.BitVector.Sized as BV
@@ -89,11 +97,25 @@ data Solver = CVC4 | DReal | Yices | Z3
 data SatResult = Valid | Invalid | Unknown
   deriving Show
 
+-- | Exceptions that can arise when attempting a proof.
+data ProveException
+  = UnexpectedExistentialProposition
+    -- ^ The functions in "Copilot.Theorem.What4" can only prove properties with
+    -- universally quantified propositions. The functions in
+    -- "Copilot.Theorem.What4" will throw this exception if they encounter an
+    -- existentially quantified proposition.
+  deriving Show
+instance Exception ProveException
+
 type CounterExample = [(String, Some CopilotValue)]
 
 -- | Attempt to prove all of the properties in a spec via an SMT solver (which
 -- must be installed locally on the host). Return an association list mapping
 -- the names of each property to the result returned by the solver.
+--
+-- PRE: All of the properties in the 'CS.Spec' use universally quantified
+-- propositions. Attempting to supply an existentially quantified proposition
+-- will cause a 'UnexpectedExistentialProposition' exception to be thrown.
 prove :: Solver
       -- ^ Solver to use
       -> CS.Spec
@@ -118,7 +140,13 @@ prove solver spec = do
   -- This process performs k-induction where we use @k = maxBufLen@.
   -- The choice for @k@ is heuristic, but often effective.
   let proveProperties = forM (CS.specProperties spec) $ \pr -> do
-        let prop = CS.extractProp (CS.propertyProp pr)
+        -- This function only supports universally quantified propositions, so
+        -- throw an exception if we encounter an existentially quantified
+        -- proposition.
+        let prop =
+              case CS.propertyProp pr of
+                CS.Forall p  -> p
+                CS.Exists {} -> throw UnexpectedExistentialProposition
         -- State the base cases for k induction.
         base_cases <- forM [0 .. maxBufLen - 1] $ \i -> do
           xe <- translateExpr sym mempty prop (AbsoluteOffset i)
@@ -181,6 +209,10 @@ prove solver spec = do
 -- to carry out a bisimulation proof that establishes a correspondence between
 -- the states of the Copilot stream program and the C code that @copilot-c99@
 -- would generate for that Copilot program.
+--
+-- PRE: All of the properties in the 'CS.Spec' use universally quantified
+-- propositions. Attempting to supply an existentially quantified proposition
+-- will cause a 'UnexpectedExistentialProposition' exception to be thrown.
 computeBisimulationProofBundle ::
      WFP.IsInterpretedFloatSymExprBuilder sym
   => sym
@@ -342,6 +374,10 @@ computeExternalInputs sym = do
     return (nm, Some tp, v)
 
 -- | Compute the user-provided property assumptions in a Copilot program.
+--
+-- PRE: All of the properties in the 'CS.Spec' use universally quantified
+-- propositions. Attempting to supply an existentially quantified proposition
+-- will cause a 'UnexpectedExistentialProposition' exception to be thrown.
 computeAssumptions ::
      forall sym.
      WFP.IsInterpretedFloatSymExprBuilder sym
@@ -364,6 +400,10 @@ computeAssumptions sym properties spec =
       [ CS.extractProp (CS.propertyProp p)
       | p <- CS.specProperties spec
       , elem (CS.propertyName p) properties
+      , let prop =
+              case CS.propertyProp p of
+                CS.Forall pr -> pr
+                CS.Exists {} -> throw UnexpectedExistentialProposition
       ]
 
     -- Compute all of the what4 predicates corresponding to each user-provided

@@ -1,5 +1,9 @@
-2025-01-28
+2025-02-04
         * Fix typo in documentation. (#587)
+        * Introduce a `Prop` data type, which captures whether a proposition is
+          universally or existentially quantified. (#254)
+        * Change the `propertyExpr :: Expr Bool` field of `Property` to
+          `propertyProp :: Prop`. (#254)
 
 2025-01-07
         * Version bump (4.2). (#577)

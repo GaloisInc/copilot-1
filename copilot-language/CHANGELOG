@@ -1,5 +1,7 @@
-2025-01-28
+2025-02-04
         * Fix typo in documentation. (#587)
+        * Change the `Stream Bool` field of `Property` to `Prop a` so as to
+          encode how the underlying proposition is quantified. (#254)
 
 2025-01-07
         * Version bump (4.2). (#577)

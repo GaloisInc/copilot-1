@@ -1,6 +1,8 @@
-2025-01-28
+2025-02-04
         * Fix multiple typos in README. (#560)
         * Fix typo in documentation. (#587)
+        * Make the functions in `Copilot.Theorem.What4` reject existentially
+          quantified properties. (#254)
 
 2025-01-07
         * Version bump (4.2). (#577)

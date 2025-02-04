@@ -150,7 +150,8 @@ checkResult solver propName spec expectation = do
 -- | Build a 'Spec' that contains one property with the given name and defined
 -- by the given boolean expression.
 propSpec :: String -> Expr Bool -> Spec
-propSpec propName propExpr = Spec [] [] [] [Copilot.Property propName propExpr]
+propSpec propName propExpr =
+  Spec [] [] [] [Copilot.Property propName (Copilot.Forall propExpr)]
 
 -- | Equality for 'SatResult'.
 --

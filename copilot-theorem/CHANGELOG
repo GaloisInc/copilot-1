@@ -1,6 +1,10 @@
-2025-01-28
+2025-02-14
         * Fix multiple typos in README. (#560)
         * Fix typo in documentation. (#587)
+        * Add a prove' function, which produces a counterexample when a property
+          is invalid. (#589)
+        * Add a Typed constraint and a Type field to XEmptyArray. (#589)
+        * Add a KnownNat constraint to XArray. (#589)
 
 2025-01-07
         * Version bump (4.2). (#577)

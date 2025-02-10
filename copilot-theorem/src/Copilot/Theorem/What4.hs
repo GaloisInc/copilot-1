@@ -64,6 +64,7 @@ import qualified Data.BitVector.Sized as BV
 import Data.Foldable (foldrM)
 import Data.List (genericLength)
 import qualified Data.Map as Map
+import Data.Parameterized.Classes (ShowF)
 import Data.Parameterized.NatRepr
 import Data.Parameterized.Nonce
 import Data.Parameterized.Some
@@ -419,6 +420,24 @@ expectedBool what xe =
 -- | A Copilot value paired with its 'CT.Type'.
 data CopilotValue a where
   CopilotValue :: CT.Typed a => CT.Type a -> a -> CopilotValue a
+
+instance Show (CopilotValue a) where
+  showsPrec p (CopilotValue ty val) =
+    case ty of
+      CT.Bool -> showsPrec p val
+      CT.Int8 -> showsPrec p val
+      CT.Int16 -> showsPrec p val
+      CT.Int32 -> showsPrec p val
+      CT.Int64 -> showsPrec p val
+      CT.Word8 -> showsPrec p val
+      CT.Word16 -> showsPrec p val
+      CT.Word32 -> showsPrec p val
+      CT.Word64 -> showsPrec p val
+      CT.Float -> showsPrec p val
+      CT.Double -> showsPrec p val
+      CT.Array {} -> showsPrec p val
+      CT.Struct {} -> showsPrec p val
+instance ShowF CopilotValue
 
 -- | Convert a symbolic 'XExpr' into a concrete 'CopilotValue'. Note that
 -- struct values are not currently supported, so attempting to convert an

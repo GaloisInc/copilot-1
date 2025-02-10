@@ -37,12 +37,17 @@ module Copilot.Theorem.What4
     prove
   , Solver(..)
   , SatResult(..)
+  , prove'
+  , SatResult'(..)
+  , CounterExample(..)
     -- * Bisimulation proofs about @copilot-c99@ code
   , computeBisimulationProofBundle
   , BisimulationProofBundle(..)
   , BisimulationProofState(..)
     -- * What4 representations of Copilot expressions
   , XExpr(..)
+  , CopilotValue(..)
+  , StreamOffset(..)
   ) where
 
 import qualified Copilot.Core.Expr       as CE
@@ -92,6 +97,163 @@ data Solver = CVC4 | DReal | Yices | Z3
 data SatResult = Valid | Invalid | Unknown
   deriving Show
 
+-- | The 'prove'' function returns results of this form for each property in a
+-- spec. This is largely the same as 'SatResult', except that 'Invalid'' also
+-- records a 'CounterExample'.
+data SatResult' = Valid' | Invalid' CounterExample | Unknown'
+  deriving Show
+
+-- | Concrete values that cause a property in a Copilot specification to be
+-- invalid. As a simple example, consider the following spec:
+--
+-- @
+-- spec :: Spec
+-- spec = do
+--   let s :: Stream Bool
+--       s = [False] ++ constant True
+--   void $ prop "should be invalid" (forAll s)
+-- @
+--
+-- This defines a stream @s@ where the first value is @False@, but all
+-- subsequent values are @True@'. This is used in a property that asserts that
+-- the values in @s@ will be @True@ at all possible time steps. This is clearly
+-- not true, given that @s@'s first value is @False@. As such, we would expect
+-- that proving this property would yield an 'Invalid'' result, where one of
+-- the base cases would state that the @s@ stream contains a @False@ value.
+--
+-- We can use the 'prove'' function to query an SMT solver to compute a
+-- counterexample:
+--
+-- @
+-- CounterExample
+--   { 'baseCases' =
+--       [False]
+--   , 'inductionStep' =
+--       True
+--   , 'concreteExternVars' =
+--       fromList []
+--   , 'concreteStreamValues' =
+--       fromList
+--         [ ( (0, 'AbsoluteOffset' 0), False )
+--         , ( (0, 'RelativeOffset' 0), False )
+--         , ( (0, 'RelativeOffset' 1), True )
+--         ]
+--   }
+-- @
+--
+-- Let's go over what this counterexample is saying:
+--
+-- * The 'inductionStep' of the proof is 'True', so that part of the proof was
+--   successful. On the other hand, the 'baseCases' contain a 'False', so the
+--   proof was falsified when proving the base cases. (In this case, the list
+--   has only one element, so there is only a single base case.)
+--
+-- * 'concreteStreamValues' reports the SMT solver's concrete values for each
+--   stream during relevant parts of the proof as a 'Map.Map'.
+--
+--   The keys of the map are pairs. The first element of the pair is the stream
+--   'CE.Id', and in this example, the only 'CE.Id' is @0@, corresponding to the
+--   stream @s@. The second element is the time offset. An 'AbsoluteOffset'
+--   indicates an offset starting from the initial time step, and a
+--   'RelativeOffset' indicates an offset from an arbitrary point in time.
+--   'AbsoluteOffset's are used in the base cases of the proof, and
+--   'RelativeOffset's are used in the induction step of the proof.
+--
+--   The part of the map that is most interesting to us is the
+--   @( (0, 'AbsoluteOffset' 0), False )@ entry, which represents a base case
+--   where there is a value of @False@ in the stream @s@ during the initial time
+--   step. Sure enough, this is enough to falsify the property @forAll s@.
+--
+-- * There are no extern streams in this example, so 'concreteExternVars' is
+--   empty.
+--
+-- We can also see an example of where a proof succeeds in the base cases, but
+-- fails during the induction step:
+--
+-- @
+-- spec :: Spec
+-- spec = do
+--   let t :: Stream Bool
+--       t = [True] ++ constant False
+--   void $ prop "should also be invalid" (forAll t)
+-- @
+--
+-- With the @t@ stream above, the base cases will succeed ('prove'' uses
+-- @k@-induction with a value of @k == 1@ in this example, so there will only
+-- be a single base case). On the other hand, the induction step will fail, as
+-- later values in the stream will be @False@. If we try to 'prove'' this
+-- property, then it will fail with:
+--
+-- @
+-- CounterExample
+--   { 'baseCases' =
+--       [True]
+--   , 'inductionStep' =
+--       False
+--   , 'concreteExternVars' =
+--       fromList []
+--   , 'concreteStreamValues' =
+--       fromList
+--         [ ( (0, 'AbsoluteOffset' 0), True )
+--         , ( (0, 'RelativeOffset' 0), True )
+--         , ( (0, 'RelativeOffset' 1), False )
+--         ]
+--   }
+-- @
+--
+-- This time, the 'inductionStep' is 'False'. If we look at the
+-- 'concreteStreamValues', we see the values at @'RelativeOffset' 0@ and
+-- @'RelativeOffset' 1@ (which are relevant to the induction step) are @True@
+-- and @False@, respectively. Since this is a proof by @k@-induction where
+-- @k == 1@, the fact that the value at @'RelativeOffset 1@ is @False@ indicates
+-- that the induction step was falsified.
+--
+-- Note that this proof does not say /when/ exactly the time steps at
+-- @'RelativeOffset' 0@ or @'RelativeOffset' 1@ occur, only that that will occur
+-- relative to some arbitrary point in time. In this example, they occur
+-- relative to the initial time step, so @'RelativeOffset' 1@ would occur at the
+-- second time step overall. In general, however, these time steps may occur far
+-- in the future, so it is possible that one would need to step through the
+-- execution of the streams for quite some time before finding the
+-- counterexample.
+--
+-- Be aware that counterexamples involving struct values are not currently
+-- supported.
+data CounterExample = CounterExample
+  { -- | A list of base cases in the proof, where each entry in the list
+    -- corresponds to a particular time step. For instance, the first element
+    -- in the list corresponds to the initial time step, the second element in
+    -- the list corresponds to the second time step, and so on. A 'False' entry
+    -- anywhere in this list will cause the overall proof to be 'Invalid''.
+    --
+    -- Because the proof uses @k@-induction, the number of base cases (i.e., the
+    -- number of entries in this list) is equal to the value of @k@, which is
+    -- chosen using heuristics.
+    baseCases :: [Bool]
+    -- | Whether the induction step of the proof was valid or not. That is,
+    -- given an arbitrary time step @n@, if the property is assumed to hold at
+    -- time steps @n@, @n+1@, ..., @n+k@, then this will be @True@ is the
+    -- property can the be proven to hold at time step @n+k+1@ (and 'False'
+    -- otherwise). If this is 'False', then the overall proof will be
+    -- 'Invalid''.
+  , inductionStep :: Bool
+    -- | The concrete values in the Copilot specification's extern streams that
+    -- lead to the property being invalid.
+    --
+    -- Each key in the 'Map.Map' is the 'CE.Name' of an extern stream paired
+    -- with a 'StreamOffset' representing the time step. The key's corresponding
+    -- value is the concrete value of the extern stream at that time step.
+  , concreteExternVars :: Map.Map (CE.Name, StreamOffset) (Some CopilotValue)
+    -- | The concrete values in the Copilot specification's streams (excluding
+    -- extern streams) that lead to the property being invalid.
+    --
+    -- Each key in the 'Map.Map' is the 'CE.Id' of a stream paired with a
+    -- 'StreamOffset' representing the time step. The key's corresponding value
+    -- is the concrete value of the extern stream at that time step.
+  , concreteStreamValues :: Map.Map (CE.Id, StreamOffset) (Some CopilotValue)
+  }
+  deriving Show
+
 -- | Attempt to prove all of the properties in a spec via an SMT solver (which
 -- must be installed locally on the host). Return an association list mapping
 -- the names of each property to the result returned by the solver.
@@ -100,17 +262,53 @@ prove :: Solver
       -> CS.Spec
       -- ^ Spec
       -> IO [(CE.Name, SatResult)]
-prove solver spec = proveInternal solver spec $ \_st satRes ->
+prove solver spec = proveInternal solver spec $ \_ _ _ satRes ->
   case satRes of
     WS.Sat _   -> pure Invalid
     WS.Unsat _ -> pure Valid
     WS.Unknown -> pure Unknown
 
 -- | Attempt to prove all of the properties in a spec via an SMT solver (which
--- must be installed locally on the host). For each 'WS.SatResult' returned by
--- the solver, pass it to a continuation along with its 'TransState'.
+-- must be installed locally on the host). Return an association list mapping
+-- the names of each property to the result returned by the solver.
 --
--- This is an internal-only function that is used to power 'prove'.
+-- Unlike 'prove', 'prove'' returns a 'SatResult''. This means that if a
+-- result is invalid, then it will include a 'CounterExample' which describes
+-- the circumstances under which the property was falsified. See the Haddocks
+-- for 'CounterExample' for more details.
+--
+-- Note that this function does not currently support creating counterexamples
+-- involving struct values, so attempting to call 'prove'' on a specification
+-- that uses structs will raise an error.
+prove' :: Solver
+       -- ^ Solver to use
+       -> CS.Spec
+       -- ^ Spec
+       -> IO [(CE.Name, SatResult')]
+prove' solver spec = proveInternal solver spec $ \baseCases indStep st satRes ->
+  case satRes of
+    WS.Sat ge -> do
+      gBaseCases <- traverse (WG.groundEval ge) baseCases
+      gIndStep <- WG.groundEval ge indStep
+      gExternVars <- traverse (valFromExpr ge) (externVars st)
+      gStreamValues <- traverse (valFromExpr ge) (streamValues st)
+      let cex =
+            CounterExample
+              { baseCases = gBaseCases
+              , inductionStep = gIndStep
+              , concreteExternVars = gExternVars
+              , concreteStreamValues = gStreamValues
+              }
+      pure (Invalid' cex)
+    WS.Unsat _ -> pure Valid'
+    WS.Unknown -> pure Unknown'
+
+-- | Attempt to prove all of the properties in a spec via an SMT solver (which
+-- must be installed locally on the host). For each 'WS.SatResult' returned by
+-- the solver, pass it to a continuation along with the relevant parts of the
+-- proof-related state.
+--
+-- This is an internal-only function that is used to power 'prove' and 'prove''.
 proveInternal :: Solver
               -- ^ Solver to use
               -> CS.Spec
@@ -118,8 +316,14 @@ proveInternal :: Solver
               -> (forall sym t st fm
                    . ( sym ~ WB.ExprBuilder t st (WB.Flags fm)
                      , WI.KnownRepr WB.FloatModeRepr fm )
-                  => TransState sym
+                  => [WI.Pred sym]
+                     -- The proof's base cases
+                  -> WI.Pred sym
+                     -- The proof's induction step
+                  -> TransState sym
+                     -- The proof state
                   -> WS.SatResult (WG.GroundEvalFn t) ()
+                     -- The overall result of the proof
                   -> IO a)
               -- ^ Continuation to call on each solver result
               -> IO [(CE.Name, a)]
@@ -178,26 +382,27 @@ proveInternal solver spec k = do
         let clauses = [not_p]
 
         st <- get
+        let k' = k base_cases ind_case st
         satRes <-
           case solver of
             CVC4 -> liftIO $ WS.runCVC4InOverride sym WS.defaultLogData clauses $ \case
-              WS.Sat (ge, _) -> k st (WS.Sat ge)
-              WS.Unsat x -> k st (WS.Unsat x)
-              WS.Unknown -> k st WS.Unknown
+              WS.Sat (ge, _) -> k' (WS.Sat ge)
+              WS.Unsat x -> k' (WS.Unsat x)
+              WS.Unknown -> k' WS.Unknown
             DReal -> liftIO $ WS.runDRealInOverride sym WS.defaultLogData clauses $ \case
               WS.Sat (c, m) -> do
                 ge <- WS.getAvgBindings c m
-                k st (WS.Sat ge)
-              WS.Unsat x -> k st (WS.Unsat x)
-              WS.Unknown -> k st WS.Unknown
+                k' (WS.Sat ge)
+              WS.Unsat x -> k' (WS.Unsat x)
+              WS.Unknown -> k' WS.Unknown
             Yices -> liftIO $ WS.runYicesInOverride sym WS.defaultLogData clauses $ \case
-              WS.Sat ge -> k st (WS.Sat ge)
-              WS.Unsat x -> k st (WS.Unsat x)
-              WS.Unknown -> k st WS.Unknown
+              WS.Sat ge -> k' (WS.Sat ge)
+              WS.Unsat x -> k' (WS.Unsat x)
+              WS.Unknown -> k' WS.Unknown
             Z3 -> liftIO $ WS.runZ3InOverride sym WS.defaultLogData clauses $ \case
-              WS.Sat (ge, _) -> k st (WS.Sat ge)
-              WS.Unsat x -> k st (WS.Unsat x)
-              WS.Unknown -> k st WS.Unknown
+              WS.Sat (ge, _) -> k' (WS.Sat ge)
+              WS.Unsat x -> k' (WS.Unsat x)
+              WS.Unknown -> k' WS.Unknown
 
         pure (CS.propertyName pr, satRes)
 

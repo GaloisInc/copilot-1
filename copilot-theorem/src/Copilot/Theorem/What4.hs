@@ -91,8 +91,6 @@ data Solver = CVC4 | DReal | Yices | Z3
 data SatResult = Valid | Invalid | Unknown
   deriving Show
 
-type CounterExample = [(String, Some CopilotValue)]
-
 -- | Attempt to prove all of the properties in a spec via an SMT solver (which
 -- must be installed locally on the host). Return an association list mapping
 -- the names of each property to the result returned by the solver.

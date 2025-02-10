@@ -99,7 +99,30 @@ prove :: Solver
       -> CS.Spec
       -- ^ Spec
       -> IO [(CE.Name, SatResult)]
-prove solver spec = do
+prove solver spec = proveInternal solver spec $ \_st satRes ->
+  case satRes of
+    WS.Sat _   -> pure Invalid
+    WS.Unsat _ -> pure Valid
+    WS.Unknown -> pure Unknown
+
+-- | Attempt to prove all of the properties in a spec via an SMT solver (which
+-- must be installed locally on the host). For each 'WS.SatResult' returned by
+-- the solver, pass it to a continuation along with its 'TransState'.
+--
+-- This is an internal-only function that is used to power 'prove'.
+proveInternal :: Solver
+              -- ^ Solver to use
+              -> CS.Spec
+              -- ^ Spec
+              -> (forall sym t st fm
+                   . ( sym ~ WB.ExprBuilder t st (WB.Flags fm)
+                     , WI.KnownRepr WB.FloatModeRepr fm )
+                  => TransState sym
+                  -> WS.SatResult (WG.GroundEvalFn t) ()
+                  -> IO a)
+              -- ^ Continuation to call on each solver result
+              -> IO [(CE.Name, a)]
+proveInternal solver spec k = do
   -- Setup symbolic backend
   Some ng <- newIONonceGenerator
   sym <- WB.newExprBuilder WB.FloatIEEERepr EmptyState ng
@@ -153,23 +176,29 @@ prove solver spec = do
         not_p <- liftIO $ WI.notPred sym p
         let clauses = [not_p]
 
-        case solver of
-          CVC4 -> liftIO $ WS.runCVC4InOverride sym WS.defaultLogData clauses $ \case
-            WS.Sat (_ge, _) -> return (CS.propertyName pr, Invalid)
-            WS.Unsat _ -> return (CS.propertyName pr, Valid)
-            WS.Unknown -> return (CS.propertyName pr, Unknown)
-          DReal -> liftIO $ WS.runDRealInOverride sym WS.defaultLogData clauses $ \case
-            WS.Sat (_ge, _) -> return (CS.propertyName pr, Invalid)
-            WS.Unsat _ -> return (CS.propertyName pr, Valid)
-            WS.Unknown -> return (CS.propertyName pr, Unknown)
-          Yices -> liftIO $ WS.runYicesInOverride sym WS.defaultLogData clauses $ \case
-            WS.Sat _ge -> return (CS.propertyName pr, Invalid)
-            WS.Unsat _ -> return (CS.propertyName pr, Valid)
-            WS.Unknown -> return (CS.propertyName pr, Unknown)
-          Z3 -> liftIO $ WS.runZ3InOverride sym WS.defaultLogData clauses $ \case
-            WS.Sat (_ge, _) -> return (CS.propertyName pr, Invalid)
-            WS.Unsat _ -> return (CS.propertyName pr, Valid)
-            WS.Unknown -> return (CS.propertyName pr, Unknown)
+        st <- get
+        satRes <-
+          case solver of
+            CVC4 -> liftIO $ WS.runCVC4InOverride sym WS.defaultLogData clauses $ \case
+              WS.Sat (ge, _) -> k st (WS.Sat ge)
+              WS.Unsat x -> k st (WS.Unsat x)
+              WS.Unknown -> k st WS.Unknown
+            DReal -> liftIO $ WS.runDRealInOverride sym WS.defaultLogData clauses $ \case
+              WS.Sat (c, m) -> do
+                ge <- WS.getAvgBindings c m
+                k st (WS.Sat ge)
+              WS.Unsat x -> k st (WS.Unsat x)
+              WS.Unknown -> k st WS.Unknown
+            Yices -> liftIO $ WS.runYicesInOverride sym WS.defaultLogData clauses $ \case
+              WS.Sat ge -> k st (WS.Sat ge)
+              WS.Unsat x -> k st (WS.Unsat x)
+              WS.Unknown -> k st WS.Unknown
+            Z3 -> liftIO $ WS.runZ3InOverride sym WS.defaultLogData clauses $ \case
+              WS.Sat (ge, _) -> k st (WS.Sat ge)
+              WS.Unsat x -> k st (WS.Unsat x)
+              WS.Unknown -> k st WS.Unknown
+
+        pure (CS.propertyName pr, satRes)
 
   -- Execute the action and return the results for each property
   runTransM spec proveProperties

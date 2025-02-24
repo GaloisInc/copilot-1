@@ -141,7 +141,11 @@ streamOfProp :: C.Property -> C.Stream
 streamOfProp prop =
   C.Stream { C.streamId = 42
            , C.streamBuffer = []
-           , C.streamExpr = C.extractProp (C.propertyProp prop)
+           , C.streamExpr =
+               -- TODO RGS: Docs
+               case C.propertyProp prop of
+                 C.Forall p -> p
+                 C.Exists p -> C.Op1 C.Not p
            , C.streamExprType = C.Bool }
 
 stream :: C.Stream -> Trans Node

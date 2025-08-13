@@ -14,12 +14,17 @@ module Copilot.Compile.Bluespec.CodeGen
     -- * Stream generators
   , mkGenFun
 
+    -- * External streams
+  , mkExtWireDecln
+
     -- * Monitor processing
-  , mkStepRule
+  , mkExtRule
   , mkTriggerRule
+  , mkStepRule
 
     -- * Module interface specifications
   , mkSpecIfcFields
+  , mkSpecIfcRulesFields
   ) where
 
 -- External imports
@@ -35,7 +40,6 @@ import Copilot.Core
 import Copilot.Compile.Bluespec.Expr
 import Copilot.Compile.Bluespec.External
 import Copilot.Compile.Bluespec.Name
-import Copilot.Compile.Bluespec.Representation
 import Copilot.Compile.Bluespec.Type
 
 -- | Write a generator function for a stream.
@@ -49,6 +53,16 @@ mkGenFun name expr ty =
   where
     nameId = BS.mkId BS.NoPos $ fromString $ lowercaseName name
     def = BS.CClause [] [] (transExpr expr)
+
+-- | TODO RGS: Docs
+mkExtWireDecln :: String -> Type a -> BS.CStmt
+mkExtWireDecln name ty =
+  BS.CSBindT
+    (BS.CPVar (BS.mkId BS.NoPos (fromString (wireName name))))
+    Nothing
+    []
+    (BS.CQType [] (tWire `BS.TAp` transType ty))
+    (BS.CVar (BS.mkId BS.NoPos "mkBypassWire"))
 
 -- | Bind a buffer variable and initialise it with the stream buffer.
 mkBuffDecln :: forall a. Id -> Type a -> [a] -> [BS.CStmt]
@@ -135,42 +149,99 @@ mkAccessDecln sId ty xs =
 -- functions and external variables.
 mkSpecIfcFields :: [Trigger] -> [External] -> [BS.CField]
 mkSpecIfcFields triggers exts =
-    map mkTriggerField triggers ++ map mkExtField exts
+    concatMap mkTriggerFields triggers ++ map mkExtField exts
   where
-    -- trigger :: args_1 -> ... -> args_n -> Action
-    mkTriggerField :: Trigger -> BS.CField
-    mkTriggerField (Trigger name _ args) =
-      mkField name $
-      foldr
-        (\(UExpr arg _) res -> BS.tArrow `BS.TAp` transType arg `BS.TAp` res)
-        BS.tAction
-        args
+    -- triggerGuard :: Bool
+    -- triggerArg0 :: arg_ty_0
+    -- ...
+    -- triggerArg(n-1) :: arg_ty_(n-1)
+    mkTriggerFields :: Trigger -> [BS.CField]
+    mkTriggerFields (Trigger name _ args) =
+      mkField (guardName name) [] BS.tBool
+        : zipWith
+            (\(UExpr arg _) argName -> mkField argName [] (transType arg))
+            args
+            (argNames name)
 
-    -- ext :: Reg ty
+    -- ext :: ty -> Action
     mkExtField :: External -> BS.CField
     mkExtField (External name ty) =
-      mkField name $ tReg `BS.TAp` transType ty
+      mkField
+        name
+        [ BS.PIPrefixStr ""
+        , BS.PIArgNames [BS.mkId BS.NoPos $ fromString $ lowercaseName name]
+        ]
+        (BS.tArrow `BS.TAp` transType ty `BS.TAp` BS.tAction)
 
--- | Define a rule for a trigger function.
-mkTriggerRule :: UniqueTrigger -> BS.CRule
-mkTriggerRule (UniqueTrigger uniqueName (Trigger name _ args)) =
+-- | TODO RGS: Docs
+mkSpecIfcRulesFields :: [Trigger] -> [External] -> [BS.CField]
+mkSpecIfcRulesFields triggers exts =
+    map mkTriggerField triggers ++ map mkExtField exts
+  where
+    -- triggerAction :: arg_ty_0 -> ... -> arg_ty_(n-1) -> Action
+    mkTriggerField :: Trigger -> BS.CField
+    mkTriggerField (Trigger name _ args) =
+      mkField
+        (actionName name)
+        []
+        (foldr
+          (\(UExpr arg _) res -> BS.tArrow `BS.TAp` transType arg `BS.TAp` res)
+          BS.tAction
+          args)
+
+    -- extAction :: ActionValue ty
+    mkExtField :: External -> BS.CField
+    mkExtField (External name ty) =
+      mkField (actionName name) [] (BS.tActionValue `BS.TAp` transType ty)
+
+-- | Define a rule for an external stream. (TODO RGS: Say a bit more about what this does)
+mkExtRule :: External -> BS.CRule
+mkExtRule (External name _) =
     BS.CRule
       []
-      (Just $ cLit $ BS.LString uniqueName)
-      [ BS.CQFilter $
-        BS.CVar $ BS.mkId BS.NoPos $
-        fromString $ guardName uniqueName
+      (Just $ cLit $ BS.LString name)
+      [ BS.CQFilter $ BS.CCon BS.idTrue []
       ]
-      (BS.CApply nameExpr args')
+      (BS.Caction
+        BS.NoPos
+        [ BS.CSBind
+            (BS.CPVar extValId)
+            Nothing
+            []
+            (BS.CSelect (BS.CVar ifcRulesArgId) extActionId)
+        , BS.CSExpr Nothing $
+            BS.CApply (BS.CSelect (BS.CVar ifcArgId) extId) [BS.CVar extValId]
+        ])
   where
     ifcArgId = BS.mkId BS.NoPos $ fromString ifcArgName
-    -- Note that we use 'name' here instead of 'uniqueName', as 'name' is the
-    -- name of the actual external function.
-    nameId   = BS.mkId BS.NoPos $ fromString $ lowercaseName name
-    nameExpr = BS.CSelect (BS.CVar ifcArgId) nameId
+    ifcRulesArgId = BS.mkId BS.NoPos $ fromString ifcRulesArgName
 
-    args'   = take (length args) (map argCall (argNames uniqueName))
-    argCall = BS.CVar . BS.mkId BS.NoPos . fromString
+    extActionId = BS.mkId BS.NoPos $ fromString $ actionName name
+    extId = BS.mkId BS.NoPos $ fromString name
+    extValId = BS.mkId BS.NoPos $ fromString $ name ++ "Val"
+
+-- | Define a rule for a trigger function. (TODO RGS: Say a bit more about what this does)
+mkTriggerRule :: Trigger -> BS.CRule
+mkTriggerRule (Trigger name _ args) =
+    BS.CRule
+      []
+      (Just $ cLit $ BS.LString name)
+      [ BS.CQFilter $
+          BS.CSelect
+            (BS.CVar ifcArgId)
+            (BS.mkId BS.NoPos $ fromString $ guardName name)
+      ]
+      (BS.CApply
+        (BS.CSelect
+          (BS.CVar ifcRulesArgId)
+          (BS.mkId BS.NoPos $ fromString $ actionName name))
+        args')
+  where
+    ifcArgId = BS.mkId BS.NoPos $ fromString ifcArgName
+    ifcRulesArgId = BS.mkId BS.NoPos $ fromString ifcRulesArgName
+
+    args' = take (length args) (map argCall (argNames name))
+    argCall = BS.CSelect (BS.CVar ifcArgId) . BS.mkId BS.NoPos . fromString
 
 -- | Writes the @step@ rule that updates all streams.
 mkStepRule :: [Stream] -> Maybe BS.CRule
@@ -238,14 +309,15 @@ mkStructDecln x =
 
     mkStructField :: Value a -> BS.CField
     mkStructField (Value ty field) =
-      mkField (fieldName field) (transType ty)
+      mkField (fieldName field) [] (transType ty)
 
--- | Write a field of a struct or interface, along with its type.
-mkField :: String -> BS.CType -> BS.CField
-mkField name ty =
+-- | Write a field of a struct or interface, along with its pragmas and type
+-- signature.
+mkField :: String -> [BS.IfcPragma] -> BS.CType -> BS.CField
+mkField name pragmas ty =
   BS.CField
     { BS.cf_name = BS.mkId BS.NoPos $ fromString $ lowercaseName name
-    , BS.cf_pragmas = Nothing
+    , BS.cf_pragmas = Just pragmas
     , BS.cf_type = BS.CQType [] ty
     , BS.cf_default = []
     , BS.cf_orig_type = Nothing
@@ -259,4 +331,13 @@ tReg = BS.TCon $
     , BS.tcon_kind = Just (BS.Kfun BS.KStar BS.KStar)
     , BS.tcon_sort = BS.TIstruct (BS.SInterface [])
                                  [BS.id_write BS.NoPos, BS.id_read BS.NoPos]
+    }
+
+-- | The @Wire@ Bluespec type.
+tWire :: BS.CType
+tWire = BS.TCon $
+  BS.TyCon
+    { BS.tcon_name = BS.mkId BS.NoPos "Wire"
+    , BS.tcon_kind = Just (BS.Kfun BS.KStar BS.KStar)
+    , BS.tcon_sort = BS.TItype 0 tReg
     }

@@ -1,5 +1,8 @@
 # The design of `copilot-bluespec`
 
+TODO RGS: Update this (based on the material from
+https://github.com/Copilot-Language/copilot/discussions/654)
+
 This document provides an overview of how the `copilot-bluespec` library
 compiles a Copilot specification to a Bluespec program. We assume that you
 already have some familiarity with core Copilot concepts such as streams,

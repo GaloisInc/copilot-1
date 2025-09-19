@@ -1,0 +1,16 @@
+package Top where
+
+import Fibs
+
+mkTop :: Module Empty
+mkTop =
+  module
+    fibMod <- mkFibs
+
+    rules
+      "even": when fibMod.even_guard ==>
+        $display "even fib num: %0d" fibMod.even_arg0
+
+      "odd": when fibMod.odd_guard ==>
+        $display "odd fib num: %0d" fibMod.odd_arg0
+      

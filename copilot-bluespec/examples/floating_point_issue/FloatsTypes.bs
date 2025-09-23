@@ -1,5 +1,0 @@
-package FloatsTypes where {
-import FloatingPoint;
-                    
-import Vector
-}

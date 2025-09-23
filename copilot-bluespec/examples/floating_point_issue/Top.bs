@@ -1,0 +1,14 @@
+package Top where
+
+import Floats
+import FloatsTypes
+
+floatsIfc :: Module FloatsIfc
+floatsIfc =
+	module
+		interface
+			rtf_arg0 x =
+				$display "Here's a val: %0f" x
+
+mkTop :: Module Empty
+mkTop = mkFloats floatsIfc

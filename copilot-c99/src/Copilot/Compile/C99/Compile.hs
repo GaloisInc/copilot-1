@@ -1,4 +1,5 @@
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE CPP #-}
 -- | Compile Copilot specifications to C99 code.
 module Copilot.Compile.C99.Compile
   ( compile
@@ -34,6 +35,7 @@ import Copilot.Compile.C99.Name           ( argNames, generatorName,
                                             generatorOutputArgName, guardName )
 import Copilot.Compile.C99.Settings       ( CSettings,
                                             cSettingsOutputDirectory,
+                                            outputDirectoryToPath, 
                                             cSettingsStepFunctionName,
                                             mkDefaultCSettings )
 import Copilot.Compile.C99.Type           ( transType )
@@ -77,7 +79,7 @@ compileWith cSettings prefix spec
                              , ""
                              ]
 
-       let dir = cSettingsOutputDirectory cSettings
+       dir <- outputDirectoryToPath (cSettingsOutputDirectory cSettings)
        createDirectoryIfMissing True dir
        writeFile (dir </> prefix ++ ".c") $ cMacros ++ cFile
        writeFile (dir </> prefix ++ ".h") hFile

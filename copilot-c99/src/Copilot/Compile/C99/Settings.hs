@@ -19,15 +19,17 @@ data OutputDirectory = WithSpec
 outputDirectoryToPath :: OutputDirectory -> IO FilePath
 outputDirectoryToPath (Custom dir) = return dir
 outputDirectoryToPath CurrentDir = return "."
-outputDirectoryToPath WithSpec = return (takeDirectory __FILE__)
+outputDirectoryToPath WithSpec = do 
+  putStrLn __FILE__
+  return (takeDirectory __FILE__)
 
 
 -- | Settings used to customize the code generated.
 data CSettings = CSettings
   { cSettingsStepFunctionName :: String
-  , cSettingsOutputDirectory  :: FilePath
+  , cSettingsOutputDirectory  :: OutputDirectory
   }
 
 -- | Default settings with a step function called @step@.
 mkDefaultCSettings :: CSettings
-mkDefaultCSettings = CSettings "step" "."
+mkDefaultCSettings = CSettings "step" WithSpec

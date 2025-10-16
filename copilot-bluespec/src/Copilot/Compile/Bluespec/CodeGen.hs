@@ -40,6 +40,7 @@ import Copilot.Core
 import Copilot.Compile.Bluespec.Expr
 import Copilot.Compile.Bluespec.External
 import Copilot.Compile.Bluespec.Name
+import Copilot.Compile.Bluespec.Representation
 import Copilot.Compile.Bluespec.Type
 
 -- | Write a generator function for a stream.
@@ -54,7 +55,7 @@ mkGenFun name expr ty =
     nameId = BS.mkId BS.NoPos $ fromString $ lowercaseName name
     def = BS.CClause [] [] (transExpr expr)
 
--- | TODO RGS: Docs
+-- | Bind a @Wire@ variable using @mkBypassWire@.
 mkExtWireDecln :: String -> Type a -> BS.CStmt
 mkExtWireDecln name ty =
   BS.CSBindT
@@ -147,21 +148,21 @@ mkAccessDecln sId ty xs =
 
 -- | Define fields for a module interface containing a specification's trigger
 -- functions and external variables.
-mkSpecIfcFields :: [Trigger] -> [External] -> [BS.CField]
-mkSpecIfcFields triggers exts =
-    concatMap mkTriggerFields triggers ++ map mkExtField exts
+mkSpecIfcFields :: [UniqueTrigger] -> [External] -> [BS.CField]
+mkSpecIfcFields uniqueTriggers exts =
+    concatMap mkTriggerFields uniqueTriggers ++ map mkExtField exts
   where
-    -- triggerGuard :: Bool
-    -- triggerArg0 :: arg_ty_0
+    -- trigger_guard :: Bool
+    -- trigger_arg0 :: arg_ty_0
     -- ...
-    -- triggerArg(n-1) :: arg_ty_(n-1)
-    mkTriggerFields :: Trigger -> [BS.CField]
-    mkTriggerFields (Trigger name _ args) =
-      mkField (guardName name) [] BS.tBool
+    -- trigger_arg(n-1) :: arg_ty_(n-1)
+    mkTriggerFields :: UniqueTrigger -> [BS.CField]
+    mkTriggerFields (UniqueTrigger uniqueName (Trigger _name _ args)) =
+      mkField (guardName uniqueName) [] BS.tBool
         : zipWith
             (\(UExpr arg _) argName -> mkField argName [] (transType arg))
             args
-            (argNames name)
+            (argNames uniqueName)
 
     -- ext :: ty -> Action
     mkExtField :: External -> BS.CField
@@ -173,12 +174,13 @@ mkSpecIfcFields triggers exts =
         ]
         (BS.tArrow `BS.TAp` transType ty `BS.TAp` BS.tAction)
 
--- | TODO RGS: Docs
+-- | Define fields for a module interface containing the actions to perform for
+-- a specification's trigger functions and external variables.
 mkSpecIfcRulesFields :: [Trigger] -> [External] -> [BS.CField]
 mkSpecIfcRulesFields triggers exts =
     map mkTriggerField triggers ++ map mkExtField exts
   where
-    -- triggerAction :: arg_ty_0 -> ... -> arg_ty_(n-1) -> Action
+    -- trigger_action :: arg_ty_0 -> ... -> arg_ty_(n-1) -> Action
     mkTriggerField :: Trigger -> BS.CField
     mkTriggerField (Trigger name _ args) =
       mkField
@@ -189,14 +191,20 @@ mkSpecIfcRulesFields triggers exts =
           BS.tAction
           args)
 
-    -- extAction :: ActionValue ty
+    -- ext_action :: ActionValue ty
     mkExtField :: External -> BS.CField
     mkExtField (External name ty) =
       mkField (actionName name) [] (BS.tActionValue `BS.TAp` transType ty)
 
--- | Define a rule for an external stream. (TODO RGS: Say a bit more about what this does)
+-- | Define a rule for an external stream that performs an action on the most
+-- recently computed value from the stream.
 mkExtRule :: External -> BS.CRule
 mkExtRule (External name _) =
+    -- rules
+    --   "ext": when True ==>
+    --     action
+    --       extVal <- ifcRules.ext_action
+    --       ifc.ext extVal
     BS.CRule
       []
       (Just $ cLit $ BS.LString name)
@@ -220,27 +228,31 @@ mkExtRule (External name _) =
     extId = BS.mkId BS.NoPos $ fromString name
     extValId = BS.mkId BS.NoPos $ fromString $ name ++ "Val"
 
--- | Define a rule for a trigger function. (TODO RGS: Say a bit more about what this does)
-mkTriggerRule :: Trigger -> BS.CRule
-mkTriggerRule (Trigger name _ args) =
+-- | Define a rule for a trigger function that performs an action when the rule
+-- fires.
+mkTriggerRule :: UniqueTrigger -> BS.CRule
+mkTriggerRule (UniqueTrigger uniqueName (Trigger name _ args)) =
+    -- rules
+    --   "trigger": when ifc.trigger_guard ==>
+    --     ifcRules.trigger_action ifc.trigger_arg0
     BS.CRule
       []
-      (Just $ cLit $ BS.LString name)
+      (Just $ cLit $ BS.LString uniqueName)
       [ BS.CQFilter $
           BS.CSelect
             (BS.CVar ifcArgId)
-            (BS.mkId BS.NoPos $ fromString $ guardName name)
+            (BS.mkId BS.NoPos $ fromString $ guardName uniqueName)
       ]
-      (BS.CApply
-        (BS.CSelect
-          (BS.CVar ifcRulesArgId)
-          (BS.mkId BS.NoPos $ fromString $ actionName name))
-        args')
+      (BS.CApply actionNameExpr args')
   where
     ifcArgId = BS.mkId BS.NoPos $ fromString ifcArgName
     ifcRulesArgId = BS.mkId BS.NoPos $ fromString ifcRulesArgName
+    -- Note that we use 'name' here instead of 'uniqueName', as 'name' is the
+    -- name of the actual external function.
+    actionNameId   = BS.mkId BS.NoPos $ fromString $ actionName name
+    actionNameExpr = BS.CSelect (BS.CVar ifcRulesArgId) actionNameId
 
-    args' = take (length args) (map argCall (argNames name))
+    args' = take (length args) (map argCall (argNames uniqueName))
     argCall = BS.CSelect (BS.CVar ifcArgId) . BS.mkId BS.NoPos . fromString
 
 -- | Writes the @step@ rule that updates all streams.

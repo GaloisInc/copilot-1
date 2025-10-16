@@ -30,6 +30,7 @@ import Copilot.Compile.Bluespec.CodeGen
 import Copilot.Compile.Bluespec.External
 import Copilot.Compile.Bluespec.FloatingPoint
 import Copilot.Compile.Bluespec.Name
+import Copilot.Compile.Bluespec.Representation
 import Copilot.Compile.Bluespec.Settings
 
 -- | Compile a specification to a Bluespec file.
@@ -90,34 +91,8 @@ compile :: String -> Spec -> IO ()
 compile = compileWith mkDefaultBluespecSettings
 
 -- | Generate a @<prefix>.bs@ file from a 'Spec'. This is the main payload of
--- the Bluespec backend.
---
--- The generated Bluespec file will import a handful of files from the standard
--- library, as well as the following generated files:
---
--- * @<prefix>Ifc.bs@, which defines the interface containing the trigger
---   functions and external variables.
---
--- * @<prefix>Types.bs@, which defines any structs used in the 'Spec'.
---
--- It will also generate a @mk<prefix> :: Module <prefix>Ifc -> Module Empty@
--- function, which defines the module structure for this 'Spec'. The
--- @mk<prefix>@ function has the following structure:
---
--- * First, bind the argument of type @Module <prefix>Ifc@ so that trigger
---   functions can be invoked and external variables can be used.
---
--- * Next, declare stream buffers and indices.
---
--- * Next, declare generator functions for streams, accessor functions for
---   streams, and guard functions for triggers.
---
--- * Next, declare rules for each trigger function.
---
--- * Finally, declare a single rule that updates the stream buffers and
---   indices.
---
--- TODO RGS: Update these comments accordingly
+-- the Bluespec backend. See the @copilot-bluespec/DESIGN.md@ document for a
+-- high-level description of what this file contains.
 compileBS :: BluespecSettings -> String -> Spec -> BS.CPackage
 compileBS _bsSettings prefix spec =
     BS.CPackage
@@ -142,7 +117,8 @@ compileBS _bsSettings prefix spec =
       , BS.CImpId False $ BS.mkId BS.NoPos "BluespecFP"
       ]
 
-    -- TODO RGS: Docs
+    -- interface <prefix>Ifc {-# always_ready, always_enabled #-} =
+    --   ...
     ifcDef :: BS.CDefn
     ifcDef = BS.Cstruct
                True
@@ -152,15 +128,18 @@ compileBS _bsSettings prefix spec =
                ifcFields
                [] -- No derived instances
 
-    -- TODO RGS: Docs
+    -- {-# properties mkFibs = { verilog } #-}
     mkModuleDefPragma :: BS.CDefn
     mkModuleDefPragma = BS.CPragma $ BS.Pproperties mkModuleDefId [BS.PPverilog]
 
+    -- mk<prefix> :: Module <prefix>Ifc
+    -- mk<prefix> =
+    --   module
+    --     ...
     mkModuleDef :: BS.CDefn
     mkModuleDef = BS.CValueSign $
       BS.CDef
         mkModuleDefId
-        -- mk<prefix> :: Module <prefix>Ifc
         (BS.CQType
           []
           (BS.tModule `BS.TAp` ifcTy))
@@ -180,7 +159,8 @@ compileBS _bsSettings prefix spec =
                 ]
         ]
 
-    -- TODO RGS: Docs
+    -- interface <prefix>RulesIfc =
+    --   ...
     ifcRulesDef :: BS.CDefn
     ifcRulesDef =
       BS.Cstruct
@@ -191,7 +171,10 @@ compileBS _bsSettings prefix spec =
         ifcRulesFields
         [] -- No derived instances
 
-    -- TODO RGS: Docs
+    -- mk<prefix>Rules :: <prefix>Ifc -> <prefix>RulesIfc -> Rules
+    -- mk<prefix>Rules ifc ifcRules =
+    --   rules
+    --     ...
     mkModuleRulesDef :: BS.CDefn
     mkModuleRulesDef =
       BS.CValueSign $
@@ -204,9 +187,12 @@ compileBS _bsSettings prefix spec =
           [BS.CClause
             (map BS.CPVar [ifcArgId, ifcRulesArgId])
             []
-            (BS.Crules [] (map mkTriggerRule triggers ++ map mkExtRule exts))]
+            (BS.Crules
+              []
+              (map mkTriggerRule uniqueTriggers ++ map mkExtRule exts))]
 
-    -- TODO RGS: Docs
+    -- add<prefix>Rules :: <prefix>Ifc -> <prefix>RulesIfc -> Module Empty
+    -- add<prefix>Rules ifc ifcRules = addRules (mk<prefix>Rules ifc ifcRules)
     addModuleRulesDef :: BS.CDefn
     addModuleRulesDef =
       BS.CValueSign $
@@ -233,15 +219,19 @@ compileBS _bsSettings prefix spec =
     addModuleRulesDefId =
       BS.mkId BS.NoPos $ fromString $ "add" ++ prefix ++ "Rules"
 
-    streams  = specStreams spec
-    triggers = specTriggers spec
-    exts     = gatherExts streams triggers
+    streams        = specStreams spec
+    triggers       = specTriggers spec
+    uniqueTriggers = mkUniqueTriggers triggers
+    exts           = gatherExts streams triggers
+
+    -- Remove duplicates due to multiple guards for the same trigger.
+    triggersNoDups = nubBy compareTrigger triggers
 
     ifcArgId = BS.mkId BS.NoPos $ fromString ifcArgName
     ifcRulesArgId = BS.mkId BS.NoPos $ fromString ifcRulesArgName
 
     ifcId     = BS.mkId BS.NoPos $ fromString $ specIfcName prefix
-    ifcFields = mkSpecIfcFields triggers exts
+    ifcFields = mkSpecIfcFields uniqueTriggers exts
     ifcTy     = BS.TCon (BS.TyCon
                   { BS.tcon_name = ifcId
                   , BS.tcon_kind = Just BS.KStar
@@ -251,7 +241,7 @@ compileBS _bsSettings prefix spec =
                   })
 
     ifcRulesId = BS.mkId BS.NoPos $ fromString $ specIfcRulesName prefix
-    ifcRulesFields = mkSpecIfcRulesFields triggers exts
+    ifcRulesFields = mkSpecIfcRulesFields triggersNoDups exts
     ifcRulesTy =
       BS.TCon $
         BS.TyCon
@@ -267,7 +257,7 @@ compileBS _bsSettings prefix spec =
                 , BS.tcon_sort = BS.TIstruct (BS.SInterface []) []
                 })
 
-    -- TODO RGS: Docs
+    -- Bind @Wire@ variables for each extern stream.
     mkExtWires :: [BS.CStmt]
     mkExtWires = map extWireStmt exts
       where
@@ -291,12 +281,14 @@ compileBS _bsSettings prefix spec =
         streamGen :: Stream -> BS.CDefl
         streamGen (Stream sId _ expr ty) = mkGenFun (generatorName sId) expr ty
 
-    -- TODO RGS: Docs
+    -- Make interface methods for @<prefix>Ifc@.
     ifcMethodImpls :: [BS.CDefl]
     ifcMethodImpls =
-        concatMap triggerMethodImpls triggers
+        concatMap triggerMethodImpls uniqueTriggers
           ++ map extMethodImpl exts
       where
+        -- interface
+        --   ext val = ext_wire := val
         extMethodImpl :: External -> BS.CDefl
         extMethodImpl (External name _) =
           let valId = BS.mkId BS.NoPos "val" in
@@ -311,12 +303,18 @@ compileBS _bsSettings prefix spec =
                 (BS.CVar valId))]
             []
 
-        triggerMethodImpls :: Trigger -> [BS.CDefl]
-        triggerMethodImpls (Trigger name guard args) =
+        -- interface
+        --   trig_guard = ...
+        --   trig_arg0 = ...
+        --   ...
+        --   trig_arg(n-1) = ...
+        triggerMethodImpls :: UniqueTrigger -> [BS.CDefl]
+        triggerMethodImpls
+          (UniqueTrigger uniqueName (Trigger _name guard args)) =
             guardDef : argDefs
           where
-            guardDef = mkGenFun (guardName name) guard Bool
-            argDefs  = map argGen (zip (argNames name) args)
+            guardDef = mkGenFun (guardName uniqueName) guard Bool
+            argDefs  = map argGen (zip (argNames uniqueName) args)
 
             argGen :: (String, UExpr) -> BS.CDefl
             argGen (argName, UExpr ty expr) = mkGenFun argName expr ty

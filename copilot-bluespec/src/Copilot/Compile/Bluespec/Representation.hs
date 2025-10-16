@@ -15,7 +15,6 @@ type UniqueTriggerId = String
 data UniqueTrigger = UniqueTrigger UniqueTriggerId Trigger
 
 -- | Given a list of triggers, make their names unique.
--- TODO RGS: Make sure this is still used appropriately
 mkUniqueTriggers :: [Trigger] -> [UniqueTrigger]
 mkUniqueTriggers ts = zipWith mkUnique ts [0..]
   where

@@ -97,11 +97,12 @@ generatorName sId = streamName sId ++ "_gen"
 guardName :: String -> String
 guardName name = lowercaseName name ++ "_guard"
 
--- | TODO RGS: Docs
+-- | Turn the name of a trigger of external stream into the name of a method
+-- that performs a Bluespec @Action@.
 actionName :: String -> String
 actionName name = lowercaseName name ++ "_action"
 
--- | TODO RGS: Docs
+-- | Turn the name of an external stream into a Bluespec @Wire@.
 wireName :: String -> String
 wireName name = lowercaseName name ++ "_wire"
 

@@ -1,0 +1,19 @@
+package Top where
+
+import Floats
+import FloatsTypes
+import FloatsIfc 
+
+floatsIfc :: Module FloatsIfc
+floatsIfc = 
+	module
+		interface
+			rtf f1 f2 f3 = do 
+				$display "representing floats in bits "
+				$display "First float: sign: %b, exp: %b, mantissa: %b" (pack f1)[31:31] (pack f1)[30:23] (pack f1)[21:0]
+				$display "Second float: sign: %b, exp: %b, mantissa: %b" (pack f2)[31:31] (pack f2)[30:23] (pack f2)[21:0]
+				$display "Third float: sign: %b, exp: %b, mantissa: %b" (pack f3)[31:31] (pack f3)[30:23] (pack f3)[21:0]
+				$display ""
+
+mkTop :: Module Empty
+mkTop = mkFloats floatsIfc

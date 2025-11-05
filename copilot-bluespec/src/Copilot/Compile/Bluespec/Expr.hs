@@ -536,7 +536,7 @@ constTy ty =
     Word16    -> constInt ty . toInteger
     Word32    -> constInt ty . toInteger
     Word64    -> constInt ty . toInteger
-    Float     -> constFP ty . realToFrac
+    Float     -> constFP ty . floatToDouble
     Double    -> constFP ty
 
     -- Translating a Copilot array literal to a Bluespec Vector is somewhat
@@ -611,17 +611,40 @@ constInt ty i
                     (BS.CVar $ BS.idNegateAt BS.NoPos)
                     [cLit $ BS.LInt $ BS.ilDec $ negate i]
 
+-- | temporarily translate a float to a double for typing into constFP. Must preserve nans, infs, and zeros
+floatToDouble:: Float -> Double
+floatToDouble x
+  | isInfinite x     = if x > 0 then inf else -inf 
+  | isNaN x          = nan
+  | isNegativeZero x = (-0.0) :: Double
+  | otherwise        = realToFrac x
+  where
+    inf = read "Infinity" :: Double
+    nan = read "NaN" :: Double
+
+
 -- | Translate a Copilot floating-point literal into a Bluespec expression.
 constFP :: Type ty -> Double -> BS.CExpr
 constFP ty d
+    -- Bluespec internally represents all IEEE floating-point values as structs so 
+    -- special symbols have to be called for constructing special values. see
+    --- https://github.com/B-Lang-org/bsc/blob/main/src/Libraries/Base3-Math/FloatingPoint.bsv#L441
+    | isInfinite d = BS.CApply 
+                      (BS.CVar $ BS.mkId BS.NoPos "infinity") 
+                      [if d < 0 then BS.CCon BS.idTrue [] else BS.CCon BS.idFalse []]
+    | isNaN d      = BS.CApply 
+                      (BS.CVar $ BS.mkId BS.NoPos "qnan") []
+    | d == 0       = BS.CApply 
+                      (BS.CVar $ BS.mkId BS.NoPos "zero") 
+                      [if isNegativeZero d then BS.CCon BS.idTrue [] else BS.CCon BS.idFalse []]
+    | d > 0        = withTypeAnnotation ty $ cLit $ BS.LReal d
     -- Bluespec intentionally does not support negative literal syntax (e.g.,
     -- -42.5), so we must create negative floating-point literals using the
     -- `negate` function.
-    | d >= 0    = withTypeAnnotation ty $ cLit $ BS.LReal d
-    | otherwise = withTypeAnnotation ty $
-                  BS.CApply
-                    (BS.CVar $ BS.idNegateAt BS.NoPos)
-                    [cLit $ BS.LReal $ negate d]
+    | otherwise    = withTypeAnnotation ty $
+                     BS.CApply
+                       (BS.CVar $ BS.idNegateAt BS.NoPos)
+                       [cLit $ BS.LReal $ negate d]
 
 -- | Create a Bluespec expression consisting of a literal.
 cLit :: BS.Literal -> BS.CExpr

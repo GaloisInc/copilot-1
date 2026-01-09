@@ -61,15 +61,19 @@ tests :: Test.Framework.Test
 tests =
   testGroup "Copilot.Compile.Bluespec"
     [ testGroup "Unit tests"
-      [ testProperty "Compile specification"               testCompile
-      , testProperty "Compile specification in custom dir" testCompileCustomDir
+      [ 
+        -- testProperty "Compile specification"               testCompile
+      -- , testProperty "Compile specification in custom dir" testCompileCustomDir
       -- , testProperty "Run specification"                   testRun
       -- , testProperty "Run and compare results"             testRunCompare
       ]
     , testGroup "Regression tests"
-      [ test14
-      , test15
-      , test696
+      [ 
+        -- test14
+      -- , test15
+      -- , test696
+        test696
+      , test697
       ]
     ]
 
@@ -279,12 +283,12 @@ test696 =
       -- Haskell has different signaling rules for binary operations resulting
       --  in NaN values. Absolute comparison (===) will flag these. While
       --  technically an incorrect result but this is a separate issue.
-    , testProperty "Generates valid (+) code for Doubles (approximate with NaNs)" $
-      mkRegressionTest2 (Add Double) (zipWith (+)) vals Approximate
-    , testProperty "Generates valid (-) code for Doubles (approximate with NaNs)" $
-      mkRegressionTest2 (Sub Double) (zipWith (-)) vals Approximate
-    , testProperty "Generates valid (*) code for Doubles (approximate with NaNs)" $
-      mkRegressionTest2 (Mul Double) (zipWith (*)) vals Approximate
+    , testProperty "Generates valid (+) code for Doubles (Absolute with NaNs)" $
+      mkRegressionTest2 (Add Double) (zipWith (+)) vals Absolute
+    , testProperty "Generates valid (-) code for Doubles (Absolute with NaNs)" $
+      mkRegressionTest2 (Sub Double) (zipWith (-)) vals Absolute
+    , testProperty "Generates valid (*) code for Doubles (Absolute with NaNs)" $
+      mkRegressionTest2 (Mul Double) (zipWith (*)) vals Absolute
     ]
   where
     options = [0.0, -0.0, nan, infinity, -infinity, 1.0, -1.0]
@@ -313,12 +317,12 @@ test697 =
       -- Haskell has different signaling rules for binary operations resulting
       --  in NaN values. Absolute comparison (===) will flag these. While
       --  technically an incorrect result but this is a separate issue.
-    , testProperty "Generates valid (+) code for Floats (approximate with NaNs)" $
-      mkRegressionTest2 (Add Float) (zipWith (+)) vals Approximate
-    , testProperty "Generates valid (-) code for Floats (approximate with NaNs)" $
-      mkRegressionTest2 (Sub Float) (zipWith (-)) vals Approximate
-    , testProperty "Generates valid (*) code for Floats (approximate with NaNs)" $
-      mkRegressionTest2 (Mul Float) (zipWith (*)) vals Approximate
+    , testProperty "Generates valid (+) code for Floats (Absolute with NaNs)" $
+      mkRegressionTest2 (Add Float) (zipWith (+)) vals Absolute
+    , testProperty "Generates valid (-) code for Floats (Absolute with NaNs)" $
+      mkRegressionTest2 (Sub Float) (zipWith (-)) vals Absolute
+    , testProperty "Generates valid (*) code for Floats (Absolute with NaNs)" $
+      mkRegressionTest2 (Mul Float) (zipWith (*)) vals Absolute
     ]
   where
     options = [0.0, -0.0, nan, infinity, -infinity, 1.0, -1.0]

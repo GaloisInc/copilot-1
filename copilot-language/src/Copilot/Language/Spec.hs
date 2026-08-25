@@ -21,6 +21,8 @@ module Copilot.Language.Spec
   , observer, observers
   , Trigger (..)
   , trigger, triggers
+  , Function (..)
+  , function, functions
   , arg
   , Arg(..)
   , Property (..)
@@ -35,6 +37,7 @@ module Copilot.Language.Spec
 
 import Prelude hiding (not)
 
+import Control.Monad.State
 import Control.Monad.Writer
 
 import Copilot.Core (Typed)
@@ -60,11 +63,11 @@ import Copilot.Theorem.Prove
 --   trigger "handler_1" monitor1 []
 --   trigger "handler_2" (counter > 10) [arg counter]
 -- @
-type Spec = Writer [SpecItem] ()
+type Spec = Spec' ()
 
 -- | An action in a specification (e.g., a declaration) that returns a value that
 -- can be used in subsequent actions.
-type Spec' a = Writer [SpecItem] a
+type Spec' a = StateT Int (Writer [SpecItem]) a
 
 -- | Return the complete list of declarations inside a 'Spec' or 'Spec''.
 --
@@ -72,7 +75,7 @@ type Spec' a = Writer [SpecItem] a
 -- specifications or monitors, and is merely related to the monad defined by a
 -- 'Spec'
 runSpec :: Spec' a -> [SpecItem]
-runSpec = execWriter
+runSpec = execWriter . flip evalStateT 0
 
 -- | Filter a list of spec items to keep only the observers.
 observers :: [SpecItem] -> [Observer]
@@ -114,12 +117,23 @@ theorems =
       TheoremItem p -> p : ls
       _              -> ls
 
+-- | Filter a list of spec items to keep only the functions.
+functions :: [SpecItem] -> [Function]
+functions =
+  foldr functions' []
+  where
+  functions' e ls =
+    case e of
+      FunctionItem f -> f : ls
+      _              -> ls
+
 -- | An item of a Copilot specification.
 data SpecItem
   = ObserverItem Observer
   | TriggerItem  Trigger
   | PropertyItem Property
   | TheoremItem (Property, UProof)
+  | FunctionItem Function
 
 -- | An observer, representing a stream that we observe during execution at
 -- every sample.
@@ -185,7 +199,7 @@ extractProp (Exists p) = p
 --
 -- This function returns, in the monadic context, a reference to the
 -- proposition.
-prop :: String -> Prop a -> Writer [SpecItem] (PropRef a)
+prop :: String -> Prop a -> Spec' (PropRef a)
 prop name e = tell [PropertyItem $ Property name e]
   >> return (PropRef name)
 
@@ -193,9 +207,24 @@ prop name e = tell [PropertyItem $ Property name e]
 --
 -- This function returns, in the monadic context, a reference to the
 -- proposition.
-theorem :: String -> Prop a -> Proof a -> Writer [SpecItem] (PropRef a)
+theorem :: String -> Prop a -> Proof a -> Spec' (PropRef a)
 theorem name e (Proof p) = tell [TheoremItem (Property name e, p)]
   >> return (PropRef name)
+
+data Function where
+  Function :: (Typed arg, Typed res)
+           => Int
+           -> (Stream arg -> Stream res)
+           -> Function
+
+function :: (Typed arg, Typed res)
+         => (Stream arg -> Stream res)
+         -> Spec' (FunctionHandle arg res)
+function f = do
+  fnId <- get
+  tell [FunctionItem $ Function fnId f]
+  put (fnId + 1)
+  pure $ FunctionHandle fnId
 
 -- | Construct a function argument from a stream.
 --

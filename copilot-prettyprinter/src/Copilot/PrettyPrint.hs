@@ -38,6 +38,7 @@ ppExpr e0 = case e0 of
   Op2 op e1 e2               -> ppOp2 op (ppExpr e1) (ppExpr e2)
   Op3 op e1 e2 e3            -> ppOp3 op (ppExpr e1) (ppExpr e2) (ppExpr e3)
   Label _ s e                -> text "label "<> doubleQuotes (text s) <+> (ppExpr e)
+  CallFunction fnHdl arg     -> text (fnHdlName fnHdl) <> parens (ppExpr arg)
 
 -- | Pretty-print an untyped expression.
 --
@@ -142,6 +143,11 @@ ppStream
     <+> text "++"
     <+> ppExpr e
 
+ppFunction :: Function -> Doc
+ppFunction (Function fnDef)
+  =   text (fnHdlName (fnDefHandle fnDef)) <> parens (text (fnDefArgName fnDef))
+  <+> text "=" <+> ppExpr (fnDefBody fnDef)
+
 -- | Pretty-print a Copilot trigger as a case of a top-level @trigger@
 -- function, by pattern matching on the trigger name.
 ppTrigger :: Trigger -> Doc
@@ -192,12 +198,13 @@ ppProp (Exists e) = text "exists" <+> parens (ppExpr e)
 -- - Observer definitions
 -- - Property definitions
 ppSpec :: Spec -> Doc
-ppSpec spec = cs $$ ds $$ es $$ fs
+ppSpec spec = cs $$ ds $$ es $$ fs $$ gs
   where
     cs = foldr (($$) . ppStream)   empty (specStreams   spec)
-    ds = foldr (($$) . ppTrigger)  empty (specTriggers  spec)
-    es = foldr (($$) . ppObserver) empty (specObservers spec)
-    fs = foldr (($$) . ppProperty) empty (specProperties spec)
+    ds = foldr (($$) . ppFunction) empty (specFunctions spec)
+    es = foldr (($$) . ppTrigger)  empty (specTriggers  spec)
+    fs = foldr (($$) . ppObserver) empty (specObservers spec)
+    gs = foldr (($$) . ppProperty) empty (specProperties spec)
 
 -- | Pretty-print a Copilot specification.
 prettyPrint :: Spec -> String

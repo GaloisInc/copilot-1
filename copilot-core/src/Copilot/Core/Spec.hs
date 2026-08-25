@@ -16,6 +16,7 @@
 -- representations for Specs and the main types of element in a spec.
 module Copilot.Core.Spec
     ( Stream (..)
+    , Function (..)
     , Observer (..)
     , Trigger (..)
     , Spec (..)
@@ -29,7 +30,7 @@ module Copilot.Core.Spec
 import Data.Typeable (Typeable)
 
 -- Internal imports
-import Copilot.Core.Expr (Expr, Id, Name, UExpr)
+import Copilot.Core.Expr (Expr, FunctionDef, Id, Name, UExpr)
 import Copilot.Core.Type (Type, Typed)
 
 -- | A stream in an infinite succession of values of the same type.
@@ -43,6 +44,10 @@ data Stream = forall a . (Typeable a, Typed a) => Stream
   , streamExpr     :: Expr a
   , streamExprType :: Type a
   }
+
+data Function where
+  Function :: (Typeable arg, Typeable res)
+           => FunctionDef arg res -> Function
 
 -- | An observer, representing a stream that we observe during interpretation
 -- at every sample.
@@ -88,6 +93,7 @@ extractProp (Exists e) = e
 -- these streams implemented as observers, triggers or properties.
 data Spec = Spec
   { specStreams    :: [Stream]
+  , specFunctions  :: [Function]
   , specObservers  :: [Observer]
   , specTriggers   :: [Trigger]
   , specProperties :: [Property]

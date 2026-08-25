@@ -13,7 +13,7 @@ import qualified Data.List.NonEmpty  as NonEmpty
 import qualified Language.C99.Simple as C
 
 -- Internal imports: Copilot
-import Copilot.Core ( Array, Expr (..), Field (..), Op1 (..), Op2 (..),
+import Copilot.Core ( Array, Expr (..), FunctionHandle (..), Field (..), Op1 (..), Op2 (..),
                       Op3 (..), Type (..), Value (..), accessorName,
                       arrayElems, toValues, typeLength, typeSize )
 
@@ -147,6 +147,10 @@ transExpr (Op3 op e1 e2 e3) = do
   e2' <- transExpr e2
   e3' <- transExpr e3
   return $ transOp3 op e1' e2' e3'
+
+transExpr (CallFunction f arg) = do
+  arg' <- transExpr arg
+  pure $ funCall (fnHdlName f) [arg']
 
 -- | Translates a Copilot unary operator and its argument into a C99
 -- expression.

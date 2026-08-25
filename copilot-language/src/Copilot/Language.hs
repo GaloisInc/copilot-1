@@ -20,6 +20,7 @@ module Copilot.Language
   , module Copilot.Language.Operators.Constant
   , module Copilot.Language.Operators.Eq
   , module Copilot.Language.Operators.Extern
+  , module Copilot.Language.Operators.Function
   , module Copilot.Language.Operators.Local
   , module Copilot.Language.Operators.Label
   , module Copilot.Language.Operators.Integral
@@ -37,6 +38,7 @@ module Copilot.Language
   , arg
   , prop
   , theorem
+  , function
   , forAll
   , exists
   ) where
@@ -53,6 +55,7 @@ import Copilot.Language.Operators.Cast
 import Copilot.Language.Operators.Constant
 import Copilot.Language.Operators.Eq
 import Copilot.Language.Operators.Extern
+import Copilot.Language.Operators.Function
 import Copilot.Language.Operators.Integral
 import Copilot.Language.Operators.Local
 import Copilot.Language.Operators.Label

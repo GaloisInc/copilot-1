@@ -9,6 +9,7 @@
 
 module Copilot.Language.Stream
   ( Stream (..)
+  , FunctionHandle (..)
   , Copilot.Language.Stream.ceiling
   , Copilot.Language.Stream.floor
   , Copilot.Language.Stream.atan2
@@ -46,6 +47,12 @@ data Stream :: * -> * where
   Op3         :: (Typed a, Typed b, Typed c, Typed d)
               => Core.Op3 a b c d -> Stream a -> Stream b -> Stream c -> Stream d
   Label       :: Typed a => String -> Stream a -> Stream a
+  CallFunction :: (Typed arg, Typed res)
+               => FunctionHandle arg res -> Stream arg -> Stream res
+
+newtype FunctionHandle arg res = FunctionHandle
+  { fnHdlId :: Int
+  }
 
 -- | Dummy instance in order to make 'Stream' an instance of 'Num'.
 instance Show (Stream a) where

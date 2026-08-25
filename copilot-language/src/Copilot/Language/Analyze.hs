@@ -87,6 +87,7 @@ analyze spec = do
   mapM_ (analyzeObserver refStreams) (observers $ runSpec spec)
   mapM_ (analyzeProperty refStreams) (properties $ runSpec spec)
   mapM_ (analyzeProperty refStreams) (map fst $ theorems $ runSpec spec)
+  mapM_ (analyzeFunction refStreams) (functions $ runSpec spec)
   specExts refStreams spec >>= analyzeExts
 
 -- | Analyze a Copilot trigger and report any errors detected.
@@ -115,6 +116,10 @@ analyzeProperty refStreams (Property _ p) =
   -- from the proposition `p`, as the analysis does not depend on what the
   -- quantifier is.
   analyzeExpr refStreams (extractProp p)
+
+analyzeFunction :: IORef Env -> Function -> IO ()
+analyzeFunction refStreams (Function _ f) =
+  analyzeExpr refStreams (f (Var "dummy"))
 
 data SeenExtern = NoExtern
                 | SeenFun
@@ -151,6 +156,7 @@ analyzeExpr refStreams s = do
                              go seenExt nodes' e2 >>
                              go seenExt nodes' e3
       Label _ e           -> go seenExt nodes' e
+      CallFunction _ e    -> go seenExt nodes' e
 
 -- | Detect whether the given stream name has already been visited.
 --
@@ -282,7 +288,10 @@ specExts refStreams spec = do
   env2 <- foldM propertyExts
             env1
             (properties $ runSpec spec)
-  foldM theoremExts env2 (theorems $ runSpec spec)
+  env3 <- foldM theoremExts
+            env2
+            (theorems $ runSpec spec)
+  foldM functionExts env3 (functions $ runSpec spec)
 
   where
   observerExts :: ExternEnv -> Observer -> IO ExternEnv
@@ -304,6 +313,10 @@ specExts refStreams spec = do
 
   theoremExts :: ExternEnv -> (Property, UProof) -> IO ExternEnv
   theoremExts env (p, _) = propertyExts env p
+
+  functionExts :: ExternEnv -> Function -> IO ExternEnv
+  functionExts env (Function _ f) =
+    collectExts refStreams (f (Var "dummy")) env
 
 -- | Obtain all the externs in a stream.
 collectExts :: C.Typed a => IORef Env -> Stream a -> ExternEnv -> IO ExternEnv
@@ -336,6 +349,7 @@ collectExts refStreams stream_ env_ = do
                                    env'' <- go nodes env' e2
                                    go nodes env'' e3
       Label _ e              -> go nodes env e
+      CallFunction _ e       -> go nodes env e
 
 -- | Return the simple C type representation of the type of the values carried
 -- by a stream.

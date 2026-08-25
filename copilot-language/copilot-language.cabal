@@ -54,6 +54,7 @@ library
                  , Copilot.Language.Operators.Constant
                  , Copilot.Language.Operators.Eq
                  , Copilot.Language.Operators.Extern
+                 , Copilot.Language.Operators.Function
                  , Copilot.Language.Operators.Integral
                  , Copilot.Language.Operators.Local
                  , Copilot.Language.Operators.Label

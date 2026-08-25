@@ -6,6 +6,7 @@ module Copilot.Compile.C99.Compile
   ) where
 
 -- External imports
+import           Control.Monad.State ( runState )
 import           Data.List           ( nub, nubBy, union )
 import           Data.Maybe          ( mapMaybe )
 import           Data.Type.Equality  ( testEquality, (:~:)(Refl) )
@@ -19,7 +20,7 @@ import           System.IO           ( hPutStrLn, stderr )
 import           Text.PrettyPrint    ( render )
 
 -- Internal imports: Copilot
-import Copilot.Core ( Expr (..), Spec (..), Stream (..), Struct (..),
+import Copilot.Core ( Expr (..), Function (..), FunctionDef (..), FunctionHandle (..), Spec (..), Stream (..), Struct (..),
                       Trigger (..), Type (..), UExpr (..), UType (..),
                       Value (..) )
 
@@ -29,6 +30,7 @@ import Copilot.Compile.C99.CodeGen        ( mkAccessDecln, mkBuffDecln,
                                             mkGenFun, mkGenFunArray,
                                             mkIndexDecln, mkStep,
                                             mkStructDecln, mkStructForwDecln )
+import Copilot.Compile.C99.Expr           ( transExpr )
 import Copilot.Compile.C99.External       ( External, gatherExts )
 import Copilot.Compile.C99.Name           ( argNames, generatorName,
                                             generatorOutputArgName, guardName )
@@ -120,11 +122,14 @@ compileC cSettings spec = C.TransUnit declns funs
   where
     declns =  mkExts exts
            ++ mkGlobals streams
+           ++ mkFunctionDeclns functions
 
-    funs =  mkGenFuns streams uniqueTriggers
+    funs =  mkFunctionDefs functions
+         ++ mkGenFuns streams uniqueTriggers
          ++ [mkStep cSettings streams uniqueTriggers exts]
 
     streams        = specStreams spec
+    functions      = specFunctions spec
     triggers       = specTriggers spec
     uniqueTriggers = mkUniqueTriggers triggers
     exts           = gatherExts streams triggers
@@ -140,6 +145,55 @@ compileC cSettings spec = C.TransUnit declns funs
       where
         buffDecln  (Stream sId buff _ ty) = mkBuffDecln  sId ty buff
         indexDecln (Stream sId _    _ _ ) = mkIndexDecln sId
+
+    mkFunctionDeclns :: [Function] -> [C.Decln]
+    mkFunctionDeclns = map mkFunctionDecln
+      where
+        mkFunctionDecln :: Function -> C.Decln
+        mkFunctionDecln (Function fnDef) =
+          C.FunDecln
+            (Just C.Static)
+            (C.decay (transType (fnHdlResType fnHdl)))
+            (fnHdlName fnHdl)
+            [C.Param (mkParamTy (fnHdlArgType fnHdl)) (fnDefArgName fnDef)]
+          where
+            fnHdl = fnDefHandle fnDef
+
+        -- TODO RGS: Deduplicate this
+        -- Special case for Struct, to pass struct arguments by reference.
+        -- Arrays are also passed by reference, but using C's array type
+        -- does that automatically.
+        mkParamTy ty =
+          case ty of
+            Struct _ -> C.Ptr (transType ty)
+            _        -> transType ty
+
+    mkFunctionDefs :: [Function] -> [C.FunDef]
+    mkFunctionDefs = map mkFunctionDef
+      where
+        mkFunctionDef :: Function -> C.FunDef
+        mkFunctionDef (Function fnDef) =
+          C.FunDef
+            (Just C.Static)
+            (C.decay (transType (fnHdlResType fnHdl)))
+            (fnHdlName fnHdl)
+            [C.Param (mkParamTy (fnHdlArgType fnHdl)) (fnDefArgName fnDef)]
+            cVars
+            stmts
+          where
+            fnHdl              = fnDefHandle fnDef
+            (cExpr, state')    = runState (transExpr (fnDefBody fnDef)) (0, mempty, mempty)
+            (_, cVars, stmts') = state'
+            stmts              = stmts' ++ [C.Return $ Just cExpr]
+
+        -- TODO RGS: Deduplicate this
+        -- Special case for Struct, to pass struct arguments by reference.
+        -- Arrays are also passed by reference, but using C's array type
+        -- does that automatically.
+        mkParamTy ty =
+          case ty of
+            Struct _ -> C.Ptr (transType ty)
+            _        -> transType ty
 
     -- Make generator functions, including trigger arguments.
     mkGenFuns :: [Stream] -> [UniqueTrigger] -> [C.FunDef]
@@ -273,6 +327,9 @@ exprTypes e = case e of
   Op3 _ e1 e2 e3        -> exprTypes e1 `union` exprTypes e2
                              `union` exprTypes e3
   Label ty _ _          -> typeTypes ty
+  CallFunction f arg    -> typeTypes (fnHdlArgType f)
+                             `union` typeTypes (fnHdlResType f)
+                             `union` exprTypes arg
 
 -- | List all types of a type, returns items uniquely.
 typeTypes :: Typeable a => Type a -> [UType]

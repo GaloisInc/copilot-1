@@ -11,6 +11,8 @@ module Copilot.Core.Expr
     , Expr (..)
     , UExpr (..)
     , DropIdx
+    , FunctionHandle (..)
+    , FunctionDef (..)
     )
   where
 
@@ -64,7 +66,22 @@ data Expr a where
   Label     :: Typeable a
             => Type a -> String -> Expr a -> Expr a
 
+  CallFunction :: Typeable arg
+               => FunctionHandle arg res -> Expr arg -> Expr res
+
 -- | A untyped expression that carries the information about the type of the
 -- expression as a value, as opposed to exposing it at type level (using an
 -- existential).
 data UExpr = forall a . Typeable a => UExpr (Type a) (Expr a)
+
+data FunctionHandle arg res = FunctionHandle
+  { fnHdlName :: Name
+  , fnHdlArgType :: Type arg
+  , fnHdlResType :: Type res
+  }
+
+data FunctionDef arg res = FunctionDef
+  { fnDefHandle :: FunctionHandle arg res
+  , fnDefArgName :: Name
+  , fnDefBody :: Expr res
+  }

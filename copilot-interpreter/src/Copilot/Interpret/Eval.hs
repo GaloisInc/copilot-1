@@ -5,7 +5,7 @@
 {-# LANGUAGE BangPatterns        #-}
 {-# LANGUAGE DeriveDataTypeable  #-}
 {-# LANGUAGE GADTs               #-}
-{-# LANGUAGE Safe                #-}
+{-# LANGUAGE Trustworthy #-} -- {-# LANGUAGE Safe                #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Copilot.Interpret.Eval
@@ -16,10 +16,10 @@ module Copilot.Interpret.Eval
   , ShowType (..)
   ) where
 
-import Copilot.Core            (Expr (..), Field (..), Id, Name, Observer (..),
+import Copilot.Core            (Expr (..), Field (..), Function (..), FunctionDef (..), FunctionHandle (..), Id, Name, Observer (..),
                                 Op1 (..), Op2 (..), Op3 (..), Spec, Stream (..),
-                                Trigger (..), Type (..), UExpr (..), Value (..),
-				arrayElems, arrayUpdate, specObservers,
+                                Trigger (..), Type (..), Typed (..), UExpr (..), Value (..),
+				arrayElems, arrayUpdate, specFunctions, specObservers,
                                 specStreams, specTriggers, updateField)
 import Copilot.Interpret.Error (badUsage)
 
@@ -116,14 +116,16 @@ eval :: ShowType   -- ^ Show booleans as @0@\/@1@ (C) or @True@\/@False@
      -> ExecTrace
 eval showType k spec =
 
+  let fnDefs = map initFnDef (specFunctions spec)             in
+
   let initStrms = map initStrm (specStreams spec)             in
 
-  let strms = evalStreams k (specStreams spec) initStrms      in
+  let strms = evalStreams k (specStreams spec) fnDefs initStrms in
 
-  let trigs = map (evalTrigger showType k strms)
+  let trigs = map (evalTrigger showType k fnDefs strms)
                   (specTriggers spec)                         in
 
-  let obsvs = map (evalObserver showType k strms)
+  let obsvs = map (evalObserver showType k fnDefs strms)
                   (specObservers spec)                        in
 
   strms `seq` ExecTrace
@@ -133,42 +135,54 @@ eval showType k spec =
                     zip (map observerName (specObservers spec)) obsvs
                 }
 
+type FunctionDefEnv = [(Name, Dynamic)]
+
 -- | An environment that contains an association between (stream or extern)
 -- names and their values.
 type LocalEnv = [(Name, Dynamic)]
 
 -- | Evaluate an expression for a number of steps, obtaining the value
 -- of the sample at that time.
-evalExpr_ :: Typeable a => Int -> Expr a -> LocalEnv -> Env Id -> a
-evalExpr_ k e0 locs strms = case e0 of
+evalExpr_ :: Typeable a => Int -> Expr a -> FunctionDefEnv -> LocalEnv -> Env Id -> a
+evalExpr_ k e0 fnDefs locs strms = case e0 of
   Const _ x                          -> x
   Drop t i id                        ->
     let Just buff = lookup id strms >>= fromDynamic in
     reverse buff !! (fromIntegral i + k)
   Local t1 _ name e1 e2              ->
-    let x     = evalExpr_ k e1 locs strms in
+    let x     = evalExpr_ k e1 fnDefs locs strms in
     let locs' = (name, toDyn x) : locs  in
-    x `seq` locs' `seq` evalExpr_ k e2  locs' strms
+    x `seq` locs' `seq` evalExpr_ k e2 fnDefs locs' strms
   Var t name                         -> fromJust $ lookup name locs >>= fromDynamic
   ExternVar _ name xs                -> evalExternVar k name xs
   Op1 op e1                          ->
-    let ev1 = evalExpr_ k e1 locs strms in
+    let ev1 = evalExpr_ k e1 fnDefs locs strms in
     let op1 = evalOp1 op                in
     ev1 `seq` op1 `seq` op1 ev1
   Op2 op e1 e2                       ->
-    let ev1 = evalExpr_ k e1 locs strms in
-    let ev2 = evalExpr_ k e2 locs strms in
+    let ev1 = evalExpr_ k e1 fnDefs locs strms in
+    let ev2 = evalExpr_ k e2 fnDefs locs strms in
     let op2 = evalOp2 op                in
     ev1 `seq` ev2 `seq` op2 `seq` op2 ev1 ev2
   Op3 op e1 e2 e3                    ->
-    let ev1 = evalExpr_ k e1 locs strms in
-    let ev2 = evalExpr_ k e2 locs strms in
-    let ev3 = evalExpr_ k e3 locs strms in
+    let ev1 = evalExpr_ k e1 fnDefs locs strms in
+    let ev2 = evalExpr_ k e2 fnDefs locs strms in
+    let ev3 = evalExpr_ k e3 fnDefs locs strms in
     let op3 = evalOp3 op                in
     ev1 `seq` ev2 `seq` ev3 `seq` op3 `seq` op3 ev1 ev2 ev3
   Label _ _ e1                         ->
-    let ev1 = evalExpr_ k e1 locs strms in
+    let ev1 = evalExpr_ k e1 fnDefs locs strms in
     ev1
+  CallFunction (fnHdl :: FunctionHandle arg res) arg ->
+    let fnName = fnHdlName fnHdl in
+    let mbFnDef :: Maybe (FunctionDef arg res)
+        mbFnDef = lookup fnName fnDefs >>= fromDynamic in
+    case mbFnDef of
+      Nothing -> error $ "Could not find function: " ++ fnName
+      Just (FunctionDef { fnDefArgName = argName, fnDefBody = body }) ->
+        let arg'  = evalExpr_ k arg fnDefs locs strms in
+        let locs' = (argName, toDyn arg') : locs in
+        arg' `seq` locs' `seq` evalExpr_ k body fnDefs locs' strms
 
 -- | Evaluate an extern stream for a number of steps, obtaining the value of
 -- the sample at that time.
@@ -269,6 +283,9 @@ evalOp3 :: Op3 a b c d -> (a -> b -> c -> d)
 evalOp3 (Mux         _)  = \ !v !x !y -> if v then x else y
 evalOp3 (UpdateArray ty) = \xs n x -> arrayUpdate xs (fromIntegral n) x
 
+initFnDef :: Function -> (Name, Dynamic)
+initFnDef (Function fnDef) = (fnHdlName (fnDefHandle fnDef), toDyn fnDef)
+
 -- | Turn a stream into a key-value pair that can be added to an 'Env' for
 -- simulation.
 initStrm :: Stream -> (Id, Dynamic)
@@ -279,8 +296,8 @@ initStrm Stream { streamId       = id
 
 -- | Evaluate several streams for a number of steps, producing the environment
 -- at the end of the evaluation.
-evalStreams :: Int -> [Stream] -> Env Id -> Env Id
-evalStreams top specStrms initStrms =
+evalStreams :: Int -> [Stream] -> FunctionDefEnv -> Env Id -> Env Id
+evalStreams top specStrms fnDefs initStrms =
   -- XXX actually only need to compute until shortest stream is of length k
   -- XXX this should just be a foldl' over [0,1..k]
   evalStreams_ 0 initStrms
@@ -295,7 +312,7 @@ evalStreams top specStrms initStrms =
                       , streamExpr     = e
                       , streamExprType = t } =
       let xs = fromJust $ lookup id strms >>= fromDynamic      in
-      let x  = evalExpr_ k e [] strms                          in
+      let x  = evalExpr_ k e fnDefs [] strms                   in
       let ls = x `seq` (x:xs)                                  in
       (id, toDyn ls)
 
@@ -303,11 +320,12 @@ evalStreams top specStrms initStrms =
 evalTrigger :: ShowType          -- ^ Show booleans as @0@/@1@ (C) or
                                  --   @True@/@False@ (Haskell).
             -> Int               -- ^ Number of steps to evaluate.
+            -> FunctionDefEnv
             -> Env Id            -- ^ Environment to use with known
                                  --   stream-value associations.
             -> Trigger           -- ^ Trigger to evaluate.
             -> [Maybe [Output]]
-evalTrigger showType k strms
+evalTrigger showType k fnDefs strms
   Trigger
     { triggerGuard = e
     , triggerArgs  = args
@@ -320,7 +338,7 @@ evalTrigger showType k strms
 
   -- Is the guard true?
   bs :: [Bool]
-  bs = evalExprs_ k e strms
+  bs = evalExprs_ k e fnDefs strms
 
   -- The argument outputs.
   vs :: [[Output]]
@@ -329,27 +347,28 @@ evalTrigger showType k strms
 
   evalUExpr :: UExpr -> [Output]
   evalUExpr (UExpr t e1) =
-    map (showWithType showType t) (evalExprs_ k e1 strms)
+    map (showWithType showType t) (evalExprs_ k e1 fnDefs strms)
 
 -- | Evaluate an observer for a number of steps.
 evalObserver :: ShowType  -- ^ Show booleans as @0@/@1@ (C) or @True@/@False@
                           --   (Haskell).
              -> Int       -- ^ Number of steps to evaluate.
+             -> FunctionDefEnv
              -> Env Id    -- ^ Environment to use with known stream-value
                           --   associations.
              -> Observer  -- ^ Observer to evaluate.
              -> [Output]
-evalObserver showType k strms
+evalObserver showType k fnDefs strms
   Observer
     { observerExpr     = e
     , observerExprType = t }
-  = map (showWithType showType t) (evalExprs_ k e strms)
+  = map (showWithType showType t) (evalExprs_ k e fnDefs strms)
 
 -- | Evaluate an expression for a number of steps, producing a list with the
 -- changing value of the expression until that time.
-evalExprs_ :: Typeable a => Int -> Expr a -> Env Id -> [a]
-evalExprs_ k e strms =
-  map (\i -> evalExpr_ i e [] strms) [0..(k-1)]
+evalExprs_ :: Typeable a => Int -> Expr a -> FunctionDefEnv -> Env Id -> [a]
+evalExprs_ k e fnDefs strms =
+  map (\i -> evalExpr_ i e fnDefs [] strms) [0..(k-1)]
 
 -- | Safe indexing (!!) on possibly infininite lists.
 safeIndex :: Int -> [a] -> Maybe a

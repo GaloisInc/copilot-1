@@ -20,6 +20,7 @@
 -- and the pretty-printer (@copilot-prettyprinter@).
 module Copilot.Core
     ( module Copilot.Core.Expr
+    , module Copilot.Core.FunctionArgs
     , module Copilot.Core.Operators
     , module Copilot.Core.Spec
     , module Copilot.Core.Type
@@ -35,6 +36,7 @@ import Data.Word
 
 -- Internal imports
 import Copilot.Core.Expr
+import Copilot.Core.FunctionArgs
 import Copilot.Core.Operators
 import Copilot.Core.Spec
 import Copilot.Core.Type

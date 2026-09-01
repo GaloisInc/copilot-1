@@ -48,6 +48,7 @@ library
 
     Copilot.Core
     Copilot.Core.Expr
+    Copilot.Core.FunctionArgs
     Copilot.Core.Operators
     Copilot.Core.Spec
     Copilot.Core.Type

@@ -7,6 +7,7 @@ module Copilot.Compile.C99.Compile
 
 -- External imports
 import           Control.Monad.State ( runState )
+import           Data.Foldable       ( foldl' )
 import           Data.List           ( nub, nubBy, union )
 import           Data.Maybe          ( mapMaybe )
 import           Data.Type.Equality  ( testEquality, (:~:)(Refl) )
@@ -20,7 +21,7 @@ import           System.IO           ( hPutStrLn, stderr )
 import           Text.PrettyPrint    ( render )
 
 -- Internal imports: Copilot
-import Copilot.Core ( Expr (..), Function (..), FunctionDef (..), FunctionHandle (..), Spec (..), Stream (..), Struct (..),
+import Copilot.Core ( Expr (..), Function (..), FunctionArgs (..), functionArgsToList, FunctionDef (..), FunctionHandle (..), Spec (..), Stream (..), Struct (..),
                       Trigger (..), Type (..), UExpr (..), UType (..),
                       Value (..) )
 
@@ -155,18 +156,12 @@ compileC cSettings spec = C.TransUnit declns funs
             (Just C.Static)
             (C.decay (transType (fnHdlResType fnHdl)))
             (fnHdlName fnHdl)
-            [C.Param (mkParamTy (fnHdlArgType fnHdl)) (fnDefArgName fnDef)]
+            (zipWith
+              C.Param
+              (mkFunctionParamTys (fnHdlArgTypes fnHdl))
+              (fnDefArgNames fnDef))
           where
             fnHdl = fnDefHandle fnDef
-
-        -- TODO RGS: Deduplicate this
-        -- Special case for Struct, to pass struct arguments by reference.
-        -- Arrays are also passed by reference, but using C's array type
-        -- does that automatically.
-        mkParamTy ty =
-          case ty of
-            Struct _ -> C.Ptr (transType ty)
-            _        -> transType ty
 
     mkFunctionDefs :: [Function] -> [C.FunDef]
     mkFunctionDefs = map mkFunctionDef
@@ -177,7 +172,10 @@ compileC cSettings spec = C.TransUnit declns funs
             (Just C.Static)
             (C.decay (transType (fnHdlResType fnHdl)))
             (fnHdlName fnHdl)
-            [C.Param (mkParamTy (fnHdlArgType fnHdl)) (fnDefArgName fnDef)]
+            (zipWith
+              C.Param
+              (mkFunctionParamTys (fnHdlArgTypes fnHdl))
+              (fnDefArgNames fnDef))
             cVars
             stmts
           where
@@ -186,14 +184,17 @@ compileC cSettings spec = C.TransUnit declns funs
             (_, cVars, stmts') = state'
             stmts              = stmts' ++ [C.Return $ Just cExpr]
 
-        -- TODO RGS: Deduplicate this
-        -- Special case for Struct, to pass struct arguments by reference.
-        -- Arrays are also passed by reference, but using C's array type
-        -- does that automatically.
-        mkParamTy ty =
-          case ty of
-            Struct _ -> C.Ptr (transType ty)
-            _        -> transType ty
+    -- TODO RGS: Deduplicate this
+    -- Special case for Struct, to pass struct arguments by reference.
+    -- Arrays are also passed by reference, but using C's array type
+    -- does that automatically.
+    mkParamTy ty =
+      case ty of
+        Struct _ -> C.Ptr (transType ty)
+        _        -> transType ty
+
+    mkFunctionParamTys :: FunctionArgs Type args -> [C.Type]
+    mkFunctionParamTys = functionArgsToList mkParamTy
 
     -- Make generator functions, including trigger arguments.
     mkGenFuns :: [Stream] -> [UniqueTrigger] -> [C.FunDef]
@@ -327,9 +328,17 @@ exprTypes e = case e of
   Op3 _ e1 e2 e3        -> exprTypes e1 `union` exprTypes e2
                              `union` exprTypes e3
   Label ty _ _          -> typeTypes ty
-  CallFunction f arg    -> typeTypes (fnHdlArgType f)
+  CallFunction f args   -> functionArgsTypeTypes (fnHdlArgTypes f)
                              `union` typeTypes (fnHdlResType f)
-                             `union` exprTypes arg
+                             `union` functionArgsExprTypes args
+
+functionArgsTypeTypes :: FunctionArgs Type args -> [UType]
+functionArgsTypeTypes args =
+  foldl' union [] (functionArgsToList typeTypes args)
+
+functionArgsExprTypes :: FunctionArgs Expr args -> [UType]
+functionArgsExprTypes args =
+  foldl' union [] (functionArgsToList exprTypes args)
 
 -- | List all types of a type, returns items uniquely.
 typeTypes :: Typeable a => Type a -> [UType]

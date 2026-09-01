@@ -4,6 +4,7 @@
 {-# LANGUAGE FlexibleInstances         #-}
 {-# LANGUAGE GADTs                     #-}
 {-# LANGUAGE KindSignatures            #-}
+{-# LANGUAGE RankNTypes                #-}
 {-# LANGUAGE ScopedTypeVariables       #-}
 {-# LANGUAGE StandaloneDeriving        #-}
 {-# LANGUAGE Trustworthy               #-}
@@ -23,6 +24,8 @@ module Copilot.Core.Type
     ( Type (..)
     , Typed (..)
     , typeOfDefault
+    , withTyped
+    , TypedArgs (..)
     , UType (..)
     , SimpleType (..)
 
@@ -59,6 +62,7 @@ import GHC.TypeLits       (KnownNat, KnownSymbol, Symbol, natVal, sameNat,
                            sameSymbol, symbolVal)
 
 -- Internal imports
+import Copilot.Core.FunctionArgs (FunctionArgs (..), OneArg)
 import Copilot.Core.Type.Array (Array)
 
 -- | The value of that is a product or struct, defined as a constructor with
@@ -287,6 +291,38 @@ instance Typed Double where
 instance (Typeable t, Typed t, KnownNat n) => Typed (Array n t) where
   typeOf               = Array typeOf
   simpleType (Array t) = SArray t
+
+withTyped :: Type a -> (Typed a => r) -> r
+withTyped ty k =
+  case ty of
+    Bool -> k
+    Int8 -> k
+    Int16 -> k
+    Int32 -> k
+    Int64 -> k
+    Word8 -> k
+    Word16 -> k
+    Word32 -> k
+    Word64 -> k
+    Float -> k
+    Double -> k
+    Array{} -> k
+    Struct{} -> k
+
+class Typeable args => TypedArgs args where
+  typeOfArgs :: FunctionArgs Type args
+
+instance TypedArgs () where
+  typeOfArgs = FunctionArgs0
+
+instance Typed arg1 => TypedArgs (OneArg arg1) where
+  typeOfArgs = FunctionArgs1 typeOf
+
+instance (Typed arg1, Typed arg2) => TypedArgs (arg1, arg2) where
+  typeOfArgs = FunctionArgs2 typeOf typeOf
+
+instance (Typed arg1, Typed arg2, Typed arg3) => TypedArgs (arg1, arg2, arg3) where
+  typeOfArgs = FunctionArgs3 typeOf typeOf typeOf
 
 -- | A untyped type (no phantom type).
 data UType = forall a . Typeable a => UType (Type a)

@@ -39,6 +39,10 @@ module Copilot.Language
   , prop
   , theorem
   , function
+  , function0
+  , function1
+  , function2
+  , function3
   , forAll
   , exists
   ) where

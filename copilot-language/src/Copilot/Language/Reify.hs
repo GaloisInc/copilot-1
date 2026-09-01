@@ -8,6 +8,7 @@
 {-# LANGUAGE Rank2Types                #-}
 {-# LANGUAGE Safe                      #-}
 {-# LANGUAGE ScopedTypeVariables       #-}
+{-# LANGUAGE TypeApplications          #-}
 
 module Copilot.Language.Reify
   ( reify
@@ -146,26 +147,64 @@ mkFunction :: IORef Int
            -> IntMap Core.Name
            -> Function
            -> IO (IntMap Core.Name, Core.Function)
-mkFunction refMkId refStreams refMap fnNames (Function fHdlId (f :: Stream arg -> Stream res)) = do
+mkFunction refMkId refStreams refMap fnNames (Function fHdlId tysOfArgs (f :: Core.FunctionArgs Stream args -> Stream res)) = do
   fnNameId <- mkId refMkId
   let fnName = "__function_" ++ show fnNameId
-  let fnHdl :: Core.FunctionHandle arg res
+  let fnHdl :: Core.FunctionHandle args res
       fnHdl =
         Core.FunctionHandle
           { Core.fnHdlName = fnName
-          , Core.fnHdlArgType = typeOf
+          , Core.fnHdlArgTypes = tysOfArgs
           , Core.fnHdlResType = typeOf
           }
-  fnArgNameId <- mkId refMkId
-  let fnArgName = "arg_" ++ show fnArgNameId
-  body <- mkExpr refMkId refStreams refMap fnNames (f (Var fnArgName))
+  (fnArgNames, body) <- mkFunctionArgNamesAndBody
+  body' <- mkExpr refMkId refStreams refMap fnNames body
   let fnNames' = IntMap.insert fHdlId fnName fnNames
   let fn = Core.Function $ Core.FunctionDef
              { Core.fnDefHandle = fnHdl
-             , Core.fnDefArgName = fnArgName
-             , Core.fnDefBody = body
+             , Core.fnDefArgNames = fnArgNames
+             , Core.fnDefBody = body'
              }
   pure (fnNames', fn)
+  where
+  mkFunctionArgNamesAndBody :: IO ([Core.Name], Stream res)
+  mkFunctionArgNamesAndBody =
+    case tysOfArgs of
+      Core.FunctionArgs0 -> do
+        let body = f Core.FunctionArgs0
+        pure ([], body)
+      Core.FunctionArgs1 ty1 -> do
+        fnArgName1 <- mkFunctionArgName
+        let body =
+              Core.withTyped ty1 $
+                f $ Core.FunctionArgs1
+                  (Var fnArgName1)
+        pure ([fnArgName1], body)
+      Core.FunctionArgs2 ty1 ty2 -> do
+        fnArgName1 <- mkFunctionArgName
+        fnArgName2 <- mkFunctionArgName
+        let body =
+              Core.withTyped ty1 $ Core.withTyped ty2 $
+                f $ Core.FunctionArgs2
+                  (Var fnArgName1)
+                  (Var fnArgName2)
+        pure ([fnArgName1, fnArgName2], body)
+      Core.FunctionArgs3 ty1 ty2 ty3 -> do
+        fnArgName1 <- mkFunctionArgName
+        fnArgName2 <- mkFunctionArgName
+        fnArgName3 <- mkFunctionArgName
+        let body =
+              Core.withTyped ty1 $ Core.withTyped ty2 $ Core.withTyped ty3 $
+                f $ Core.FunctionArgs3
+                  (Var fnArgName1)
+                  (Var fnArgName2)
+                  (Var fnArgName3)
+        pure ([fnArgName1, fnArgName2, fnArgName3], body)
+
+  mkFunctionArgName :: IO Core.Name
+  mkFunctionArgName = do
+    fnArgNameId <- mkId refMkId
+    pure $ "arg_" ++ show fnArgNameId
 
 -- | Transform a Copilot stream expression into a Copilot Core expression.
 {-# INLINE mkExpr #-}
@@ -247,7 +286,7 @@ mkExpr refMkId refStreams refMap fnNames = go
 
     ------------------------------------------------------
 
-    CallFunction fnHdl x -> do
+    CallFunction fnHdl args -> do
       fnName <-
         case IntMap.lookup (fnHdlId fnHdl) fnNames of
           Nothing -> error "Could not look up function"
@@ -255,13 +294,40 @@ mkExpr refMkId refStreams refMap fnNames = go
       let fnHdl' =
             Core.FunctionHandle
               { Core.fnHdlName = fnName
-              , Core.fnHdlArgType = typeOf
+              , Core.fnHdlArgTypes = Core.typeOfArgs
               , Core.fnHdlResType = typeOf
               }
-      x' <- go x
-      pure $ Core.CallFunction fnHdl' x'
+      args' <- goFunctionArgs args
+      pure $ Core.CallFunction fnHdl' args'
 
     ------------------------------------------------------
+
+  goFunctionArgs :: forall args
+                  . Core.TypedArgs args
+                 => Core.FunctionArgs Stream args
+                 -> IO (Core.FunctionArgs Core.Expr args)
+  goFunctionArgs args =
+    case (Core.typeOfArgs @args, args) of
+      (Core.FunctionArgs0, Core.FunctionArgs0) ->
+        pure Core.FunctionArgs0
+      (Core.FunctionArgs1 ty1, Core.FunctionArgs1 arg1) ->
+        Core.withTyped ty1 $ do
+          arg1' <- go arg1
+          pure $ Core.FunctionArgs1 arg1'
+      (Core.FunctionArgs2 ty1 ty2, Core.FunctionArgs2 arg1 arg2) ->
+        Core.withTyped ty1 $
+        Core.withTyped ty2 $ do
+          arg1' <- go arg1
+          arg2' <- go arg2
+          pure $ Core.FunctionArgs2 arg1' arg2'
+      (Core.FunctionArgs3 ty1 ty2 ty3, Core.FunctionArgs3 arg1 arg2 arg3) ->
+        Core.withTyped ty1 $
+        Core.withTyped ty2 $
+        Core.withTyped ty3 $ do
+          arg1' <- go arg1
+          arg2' <- go arg2
+          arg3' <- go arg3
+          pure $ Core.FunctionArgs3 arg1' arg2' arg3'
 
   mkFunArg :: Arg -> IO Core.UExpr
   mkFunArg (Arg e) = do

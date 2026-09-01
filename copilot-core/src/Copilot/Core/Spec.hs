@@ -46,8 +46,8 @@ data Stream = forall a . (Typeable a, Typed a) => Stream
   }
 
 data Function where
-  Function :: (Typeable arg, Typeable res)
-           => FunctionDef arg res -> Function
+  Function :: (Typeable args, Typeable res)
+           => FunctionDef args res -> Function
 
 -- | An observer, representing a stream that we observe during interpretation
 -- at every sample.

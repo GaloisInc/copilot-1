@@ -118,8 +118,8 @@ analyzeProperty refStreams (Property _ p) =
   analyzeExpr refStreams (extractProp p)
 
 analyzeFunction :: IORef Env -> Function -> IO ()
-analyzeFunction refStreams (Function _ f) =
-  analyzeExpr refStreams (f (Var "dummy"))
+analyzeFunction refStreams (Function _ tysOfArgs f) =
+  analyzeExpr refStreams (applyDummyArgs tysOfArgs f)
 
 data SeenExtern = NoExtern
                 | SeenFun
@@ -156,7 +156,11 @@ analyzeExpr refStreams s = do
                              go seenExt nodes' e2 >>
                              go seenExt nodes' e3
       Label _ e           -> go seenExt nodes' e
-      CallFunction _ e    -> go seenExt nodes' e
+      CallFunction _ args -> goFunctionArgs seenExt nodes' args
+
+  goFunctionArgs :: SeenExtern -> Env -> C.FunctionArgs Stream args -> IO ()
+  goFunctionArgs seenExt nodes args =
+    sequence_ $ C.functionArgsToList (go seenExt nodes) args
 
 -- | Detect whether the given stream name has already been visited.
 --
@@ -315,8 +319,31 @@ specExts refStreams spec = do
   theoremExts env (p, _) = propertyExts env p
 
   functionExts :: ExternEnv -> Function -> IO ExternEnv
-  functionExts env (Function _ f) =
-    collectExts refStreams (f (Var "dummy")) env
+  functionExts env (Function _ tysOfArgs f) =
+    collectExts refStreams (applyDummyArgs tysOfArgs f) env
+
+applyDummyArgs :: C.FunctionArgs C.Type args
+               -> (C.FunctionArgs Stream args -> Stream res)
+               -> Stream res
+applyDummyArgs tysOfArgs f =
+  case tysOfArgs of
+    C.FunctionArgs0 ->
+      f C.FunctionArgs0
+    C.FunctionArgs1 ty1 ->
+      C.withTyped ty1 $
+        f $ C.FunctionArgs1
+          (Var "dummy1")
+    C.FunctionArgs2 ty1 ty2 ->
+      C.withTyped ty1 $ C.withTyped ty2 $
+        f $ C.FunctionArgs2
+          (Var "dummy1")
+          (Var "dummy2")
+    C.FunctionArgs3 ty1 ty2 ty3 ->
+      C.withTyped ty1 $ C.withTyped ty2 $ C.withTyped ty3 $
+        f $ C.FunctionArgs3
+          (Var "dummy1")
+          (Var "dummy2")
+          (Var "dummy3")
 
 -- | Obtain all the externs in a stream.
 collectExts :: C.Typed a => IORef Env -> Stream a -> ExternEnv -> IO ExternEnv
@@ -349,7 +376,22 @@ collectExts refStreams stream_ env_ = do
                                    env'' <- go nodes env' e2
                                    go nodes env'' e3
       Label _ e              -> go nodes env e
-      CallFunction _ e       -> go nodes env e
+      CallFunction _ args    -> goFunctionArgs nodes env args
+
+  goFunctionArgs :: Env -> ExternEnv -> C.FunctionArgs Stream args -> IO ExternEnv
+  goFunctionArgs nodes env args =
+    case args of
+      C.FunctionArgs0 ->
+        pure env
+      C.FunctionArgs1 arg1 ->
+        go nodes env arg1
+      C.FunctionArgs2 arg1 arg2 ->
+        do env' <- go nodes env arg1
+           go nodes env' arg2
+      C.FunctionArgs3 arg1 arg2 arg3 ->
+        do env' <- go nodes env arg1
+           env'' <- go nodes env' arg2
+           go nodes env'' arg3
 
 -- | Return the simple C type representation of the type of the values carried
 -- by a stream.

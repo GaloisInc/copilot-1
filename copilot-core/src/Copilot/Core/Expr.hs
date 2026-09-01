@@ -21,6 +21,7 @@ import Data.Typeable (Typeable)
 import Data.Word     (Word32)
 
 -- Internal imports
+import Copilot.Core.FunctionArgs (FunctionArgs)
 import Copilot.Core.Operators (Op1, Op2, Op3)
 import Copilot.Core.Type      (Type)
 
@@ -66,22 +67,22 @@ data Expr a where
   Label     :: Typeable a
             => Type a -> String -> Expr a -> Expr a
 
-  CallFunction :: Typeable arg
-               => FunctionHandle arg res -> Expr arg -> Expr res
+  CallFunction :: Typeable args
+               => FunctionHandle args res -> FunctionArgs Expr args -> Expr res
 
 -- | A untyped expression that carries the information about the type of the
 -- expression as a value, as opposed to exposing it at type level (using an
 -- existential).
 data UExpr = forall a . Typeable a => UExpr (Type a) (Expr a)
 
-data FunctionHandle arg res = FunctionHandle
+data FunctionHandle args res = FunctionHandle
   { fnHdlName :: Name
-  , fnHdlArgType :: Type arg
+  , fnHdlArgTypes :: FunctionArgs Type args
   , fnHdlResType :: Type res
   }
 
-data FunctionDef arg res = FunctionDef
-  { fnDefHandle :: FunctionHandle arg res
-  , fnDefArgName :: Name
+data FunctionDef args res = FunctionDef
+  { fnDefHandle :: FunctionHandle args res
+  , fnDefArgNames :: [Name] -- Invariant: length is equal to number of arguments
   , fnDefBody :: Expr res
   }

@@ -38,7 +38,13 @@ ppExpr e0 = case e0 of
   Op2 op e1 e2               -> ppOp2 op (ppExpr e1) (ppExpr e2)
   Op3 op e1 e2 e3            -> ppOp3 op (ppExpr e1) (ppExpr e2) (ppExpr e3)
   Label _ s e                -> text "label "<> doubleQuotes (text s) <+> (ppExpr e)
-  CallFunction fnHdl arg     -> text (fnHdlName fnHdl) <> parens (ppExpr arg)
+  CallFunction fnHdl args    -> text (fnHdlName fnHdl) <> ppFunctionArgs args
+
+ppFunctionArgs :: FunctionArgs Expr a -> Doc
+ppFunctionArgs = ppArgs . functionArgsToList ppExpr
+  where
+    ppArgs :: [Doc] -> Doc
+    ppArgs = parens . vcat . punctuate comma
 
 -- | Pretty-print an untyped expression.
 --
@@ -145,7 +151,8 @@ ppStream
 
 ppFunction :: Function -> Doc
 ppFunction (Function fnDef)
-  =   text (fnHdlName (fnDefHandle fnDef)) <> parens (text (fnDefArgName fnDef))
+  =   text (fnHdlName (fnDefHandle fnDef))
+   <> parens (vcat (punctuate comma (map text (fnDefArgNames fnDef))))
   <+> text "=" <+> ppExpr (fnDefBody fnDef)
 
 -- | Pretty-print a Copilot trigger as a case of a top-level @trigger@

@@ -4,6 +4,8 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE RankNTypes     #-}
 {-# LANGUAGE Safe           #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 
 -- | Copilot specifications consistute the main declaration of Copilot modules.
 --
@@ -22,7 +24,12 @@ module Copilot.Language.Spec
   , Trigger (..)
   , trigger, triggers
   , Function (..)
-  , function, functions
+  , function
+  , function0
+  , function1
+  , function2
+  , function3
+  , functions
   , arg
   , Arg(..)
   , Property (..)
@@ -40,8 +47,9 @@ import Prelude hiding (not)
 import Control.Monad.State
 import Control.Monad.Writer
 
-import Copilot.Core (Typed)
+import Copilot.Core (FunctionArgs, Typed, TypedArgs (..))
 import qualified Copilot.Core as Core
+import Copilot.Language.Operators.Function (Callable (..))
 import Copilot.Language.Stream
 
 import Copilot.Theorem.Prove
@@ -212,19 +220,41 @@ theorem name e (Proof p) = tell [TheoremItem (Property name e, p)]
   >> return (PropRef name)
 
 data Function where
-  Function :: (Typed arg, Typed res)
+  Function :: (TypedArgs args, Typed res)
            => Int
-           -> (Stream arg -> Stream res)
+           -> FunctionArgs Core.Type args
+           -> (FunctionArgs Stream args -> Stream res)
            -> Function
 
-function :: (Typed arg, Typed res)
-         => (Stream arg -> Stream res)
-         -> Spec' (FunctionHandle arg res)
+function :: forall args res
+          . Callable args res
+         => FunctionType args res
+         -> Spec' (FunctionHandle args res)
 function f = do
   fnId <- get
-  tell [FunctionItem $ Function fnId f]
+  tell [FunctionItem $ Function fnId typeOfArgs $ uncurryFunction @args @res f]
   put (fnId + 1)
   pure $ FunctionHandle fnId
+
+function0 :: Typed res
+          => (() -> Stream res)
+          -> Spec' (FunctionHandle () res)
+function0 = function
+
+function1 :: (Typed arg1, Typed res)
+          => (Stream arg1 -> Stream res)
+          -> Spec' (FunctionHandle (Core.OneArg arg1) res)
+function1 = function
+
+function2 :: (Typed arg1, Typed arg2, Typed res)
+          => (Stream arg1 -> Stream arg2 -> Stream res)
+          -> Spec' (FunctionHandle (arg1, arg2) res)
+function2 = function
+
+function3 :: (Typed arg1, Typed arg2, Typed arg3, Typed res)
+          => (Stream arg1 -> Stream arg2 -> Stream arg3 -> Stream res)
+          -> Spec' (FunctionHandle (arg1, arg2, arg3) res)
+function3 = function
 
 -- | Construct a function argument from a stream.
 --

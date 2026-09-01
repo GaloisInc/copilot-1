@@ -16,7 +16,7 @@ module Copilot.Interpret.Eval
   , ShowType (..)
   ) where
 
-import Copilot.Core            (Expr (..), Field (..), Function (..), FunctionDef (..), FunctionHandle (..), Id, Name, Observer (..),
+import Copilot.Core            (Expr (..), Field (..), Function (..), FunctionArgs (..), functionArgsToList, FunctionDef (..), FunctionHandle (..), Id, Name, Observer (..),
                                 Op1 (..), Op2 (..), Op3 (..), Spec, Stream (..),
                                 Trigger (..), Type (..), Typed (..), UExpr (..), Value (..),
 				arrayElems, arrayUpdate, specFunctions, specObservers,
@@ -173,16 +173,23 @@ evalExpr_ k e0 fnDefs locs strms = case e0 of
   Label _ _ e1                         ->
     let ev1 = evalExpr_ k e1 fnDefs locs strms in
     ev1
-  CallFunction (fnHdl :: FunctionHandle arg res) arg ->
+  CallFunction (fnHdl :: FunctionHandle args res) args ->
     let fnName = fnHdlName fnHdl in
-    let mbFnDef :: Maybe (FunctionDef arg res)
+    let mbFnDef :: Maybe (FunctionDef args res)
         mbFnDef = lookup fnName fnDefs >>= fromDynamic in
     case mbFnDef of
       Nothing -> error $ "Could not find function: " ++ fnName
-      Just (FunctionDef { fnDefArgName = argName, fnDefBody = body }) ->
-        let arg'  = evalExpr_ k arg fnDefs locs strms in
-        let locs' = (argName, toDyn arg') : locs in
-        arg' `seq` locs' `seq` evalExpr_ k body fnDefs locs' strms
+      Just (FunctionDef { fnDefArgNames = argNames, fnDefBody = body }) ->
+        let args'  = evalFunctionArgs k args fnDefs locs strms in
+        let locs' = zip argNames args' ++ locs in
+        args' `seq` locs' `seq` evalExpr_ k body fnDefs locs' strms
+
+evalFunctionArgs :: Typeable args
+                 => Int -> FunctionArgs Expr args -> FunctionDefEnv -> LocalEnv -> Env Id -> [Dynamic]
+evalFunctionArgs k args fnDefs locs strms = functionArgsToList evalArg args
+  where
+    evalArg :: Typeable arg => Expr arg -> Dynamic
+    evalArg arg = toDyn $ evalExpr_ k arg fnDefs locs strms
 
 -- | Evaluate an extern stream for a number of steps, obtaining the value of
 -- the sample at that time.

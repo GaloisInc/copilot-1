@@ -15,7 +15,7 @@ module Copilot.Language.Stream
   , Copilot.Language.Stream.atan2
   ) where
 
-import Copilot.Core (Typed, typeOf)
+import Copilot.Core (Typed, TypedArgs, typeOf)
 import qualified Copilot.Core as Core
 import Copilot.Language.Error
 import Copilot.Language.Prelude
@@ -47,10 +47,10 @@ data Stream :: * -> * where
   Op3         :: (Typed a, Typed b, Typed c, Typed d)
               => Core.Op3 a b c d -> Stream a -> Stream b -> Stream c -> Stream d
   Label       :: Typed a => String -> Stream a -> Stream a
-  CallFunction :: (Typed arg, Typed res)
-               => FunctionHandle arg res -> Stream arg -> Stream res
+  CallFunction :: (TypedArgs args, Typed res)
+               => FunctionHandle args res -> Core.FunctionArgs Stream args -> Stream res
 
-newtype FunctionHandle arg res = FunctionHandle
+newtype FunctionHandle args res = FunctionHandle
   { fnHdlId :: Int
   }
 

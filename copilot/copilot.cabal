@@ -242,3 +242,17 @@ executable voting
       buildable: True
     else
       buildable: False
+
+executable cast-offset
+    main-is:            CastOffset.hs
+    hs-source-dirs:     examples
+    build-depends:      base              >= 4.9  && < 5
+                      , copilot
+                      , copilot-core
+                      , copilot-c99
+                      , copilot-language
+    default-language:   Haskell2010
+    if flag(examples)
+      buildable: True
+    else
+      buildable: False

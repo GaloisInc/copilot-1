@@ -209,7 +209,7 @@ evalOp1 op = case op of
     Ceiling _  -> P.fromIntegral . idI . P.ceiling
     Floor _    -> P.fromIntegral . idI . P.floor
     BwNot _    -> complement
-    Cast f _ _   -> f
+    Cast _ f _ _ -> f -- TODO: Take offset into account
     GetField (Struct _) _ f -> unfield . f
   where
     -- Used to help GHC pick a return type for ceiling/floor

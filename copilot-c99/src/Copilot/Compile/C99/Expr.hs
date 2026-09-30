@@ -52,6 +52,38 @@ transExpr (ExternVar _ name _) = return $ C.Ident (exCpyName name)
 
 transExpr (Label _ _ e) = transExpr e -- ignore label
 
+transExpr (Op1 (Cast (Just offset) _f ty1 ty2) e) = do
+  e' <- transExpr e
+
+  -- Variable to hold the new, casted value
+  (idx, _, _) <- get
+  let varName = "_v" ++ show idx
+      varExpr = C.Ident varName
+  modify (\(i, x, y) -> (i + 1, x, y))
+
+  -- Add new var decl
+  let initDecl = C.VarDecln Nothing (transLocalVarDeclType ty2) varName Nothing
+  modify (\(i, x, y) -> (i, x ++ [initDecl], y))
+
+  -- Copy the original to value to the new value, casting its type in the
+  -- process.
+  let dest = case ty2 of
+               Array _ -> varExpr
+               _       -> C.UnaryOp C.Ref varExpr
+      src  = case ty1 of
+               Array _ -> e'
+               _       -> C.UnaryOp C.Ref e'
+      size = C.SizeOfType (C.TypeName (transType ty2))
+      memcpyStmt = C.Expr $
+                     memcpy
+                       dest
+                       (C.BinaryOp C.Add src (C.LitInt (toInteger offset)))
+                       size
+
+  modify (\(i, x, y) -> (i, x, y ++ [ memcpyStmt ]))
+
+  pure varExpr
+
 transExpr (Op1 op e) = do
   e' <- transExpr e
   return $ transOp1 op e'
@@ -183,7 +215,9 @@ transOp1 op e =
     Ceiling  ty   -> funCall (specializeMathFunName ty "ceil") [e]
     Floor    ty   -> funCall (specializeMathFunName ty "floor") [e]
     BwNot    _    -> (C..~) e
-    Cast   _ _ ty -> C.Cast (transTypeName ty) e
+    -- Note that there is also a special case earlier in transExpr that handles
+    -- casts involving offsets.
+    Cast _ _ _ ty -> C.Cast (transTypeName ty) e
     GetField (Struct _)  _ f -> C.Dot e (accessorName f)
     ExternFun1 name ty1 ty2 -> funCall name [e]
 

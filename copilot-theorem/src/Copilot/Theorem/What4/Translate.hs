@@ -520,7 +520,7 @@ translateOp1 sym origExpr op xe = case (op, xe) of
   (CE.BwNot _, xe) -> liftIO $ case xe of
     XBool e -> XBool <$> WI.notPred sym e
     _ -> bvOp (WI.bvNotBits sym) xe
-  (CE.Cast _ _ tp, xe) -> liftIO $ castOp sym origExpr tp xe
+  (CE.Cast _ _ _ tp, xe) -> liftIO $ castOp sym origExpr tp xe -- TODO: Take offset into account
   (CE.GetField atp _ftp extractor, xe) -> translateGetField atp extractor xe
   where
     -- Translate an 'CE.Abs' operation and its argument into a what4

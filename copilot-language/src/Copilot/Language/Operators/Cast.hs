@@ -79,7 +79,7 @@ instance Cast Bool Int64 where
 -- | Cast a stream carrying numbers to an integral using 'fromIntegral'.
 castIntegral :: (Integral a, Typed a, Num b, Typed b) => Stream a -> Stream b
 castIntegral (Const x) = Const (fromIntegral x)
-castIntegral x         = Op1 (C.Cast fromIntegral typeOf typeOf) x
+castIntegral x         = Op1 (C.Cast Nothing fromIntegral typeOf typeOf) x
 
 -- | Identity casting.
 instance Cast Word8 Word8 where

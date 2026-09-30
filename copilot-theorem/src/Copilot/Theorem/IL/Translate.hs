@@ -161,7 +161,7 @@ expr (C.Op1 (C.Sign ta) e) = case ta of
 expr (C.Op1 (C.Sqrt _) e) = do
   e' <- expr e
   return $ Op2 Real Pow e' (ConstR 0.5)
-expr (C.Op1 (C.Cast _ _ _) e) = expr e
+expr (C.Op1 (C.Cast _ _ _ _) e) = expr e -- TODO: Take offset into account
 expr (C.Op1 op e) = do
   e' <- expr e
   return $ Op1 t' op' e'

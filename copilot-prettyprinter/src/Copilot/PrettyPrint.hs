@@ -70,7 +70,7 @@ ppOp1 op = case op of
   Ceiling _               -> ppPrefix "ceiling"
   Floor _                 -> ppPrefix "floor"
   BwNot _                 -> ppPrefix "~"
-  Cast _ _ _              -> ppPrefix "(cast)"
+  Cast _ _ _ _            -> ppPrefix "(cast)" -- TODO: Take offset into account
   GetField (Struct _) _ f -> \e -> ppInfix "#" e (text $ accessorName f)
   GetField _ _ _          -> impossible "ppOp1" "Copilot.PrettyPrint"
 

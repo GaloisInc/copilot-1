@@ -15,7 +15,7 @@ module Copilot.Core.Operators
 -- External imports
 import Data.Bits     (Bits)
 import Data.Typeable (Typeable)
-import Data.Word     (Word32)
+import Data.Word     (Word32, Word64)
 import GHC.TypeLits  (KnownSymbol)
 
 -- Internal imports
@@ -53,7 +53,7 @@ data Op1 a b where
   -- Bitwise operators.
   BwNot    :: Bits a => Type a -> Op1 a a
   -- Casting operator.
-  Cast     :: (a -> b) -> Type a -> Type b -> Op1 a b
+  Cast     :: Maybe Word64 -> (a -> b) -> Type a -> Type b -> Op1 a b
               -- ^ Casting operator.
 
   -- Struct operator.
